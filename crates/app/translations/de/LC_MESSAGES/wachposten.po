@@ -1,0 +1,190 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: de\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid "Alerts"
+msgstr "Meldungen"
+
+msgid "Alerts ({})"
+msgstr "Meldungen ({})"
+
+msgid "All quiet"
+msgstr "Alles ruhig"
+
+msgid "Allow"
+msgstr "Erlauben"
+
+msgid "Allowed"
+msgstr "Erlaubt"
+
+msgid "Also look up single files online (sends their SHA-256 hash)"
+msgstr "Einzelne Dateien auch online nachschlagen (sendet ihren SHA-256-Hash)"
+
+msgid "An admin decides about this."
+msgstr "Darüber entscheidet ein Admin."
+
+msgid "Auth-Key"
+msgstr "Auth-Key"
+
+msgid "Check now"
+msgstr "Jetzt prüfen"
+
+msgid "ClamAV"
+msgstr "ClamAV"
+
+msgid "Downloads and programs you allowed. They are not reported again unless you revoke them. Allowed changes to autostart and other entries became the new normal state."
+msgstr "Downloads und Programme, die du erlaubt hast. Sie werden nicht mehr gemeldet, bis du die Erlaubnis zurücknimmst. Erlaubte Änderungen an Autostart und anderen Einträgen sind zum neuen Normalzustand geworden."
+
+msgid "Extra rule folders (separated by commas):"
+msgstr "Weitere Regelordner (durch Kommas getrennt):"
+
+msgid "Hash list (MalwareBazaar)"
+msgstr "Hashliste (MalwareBazaar)"
+
+msgid "History"
+msgstr "Verlauf"
+
+msgid "Known malware"
+msgstr "Bekannte Schadsoftware"
+
+msgid "No open alerts."
+msgstr "Keine offenen Meldungen."
+
+msgid "Nothing allowed yet."
+msgstr "Noch nichts erlaubt."
+
+msgid "Nothing recorded yet."
+msgstr "Noch nichts aufgezeichnet."
+
+msgid "Nothing waits for a decision."
+msgstr "Nichts wartet auf eine Entscheidung."
+
+msgid "Overview"
+msgstr "Übersicht"
+
+msgid "Please decide on them in the Alerts tab."
+msgstr "Bitte entscheide im Reiter „Meldungen“."
+
+msgid "Programs from temporary folders"
+msgstr "Programme aus temporären Ordnern"
+
+msgid "Protection"
+msgstr "Schutz"
+
+msgid "Put back"
+msgstr "Zurückholen"
+
+msgid "Quarantine"
+msgstr "Quarantäne"
+
+msgid "Remove"
+msgstr "Entfernen"
+
+msgid "Removed files are kept here and can be put back."
+msgstr "Entfernte Dateien liegen hier und lassen sich zurückholen."
+
+msgid "Revoke"
+msgstr "Zurücknehmen"
+
+msgid "Save"
+msgstr "Speichern"
+
+msgid "Scan new downloads"
+msgstr "Neue Downloads prüfen"
+
+msgid "Scanning"
+msgstr "Prüfen"
+
+msgid "Select an entry on the left."
+msgstr "Wähle links einen Eintrag aus."
+
+msgid "Settings"
+msgstr "Einstellungen"
+
+msgid "Settings apply to your agent. System-wide settings are in /etc/wachposten/daemon.toml."
+msgstr "Die Einstellungen gelten für deinen Agenten. Systemweite Einstellungen stehen in /etc/wachposten/daemon.toml."
+
+msgid "Show alerts"
+msgstr "Meldungen zeigen"
+
+msgid "System"
+msgstr "System"
+
+msgid "System-wide"
+msgstr "Systemweit"
+
+msgid "The quarantine is empty."
+msgstr "Die Quarantäne ist leer."
+
+msgid "Use ClamAV when clamd runs"
+msgstr "ClamAV nutzen, wenn clamd läuft"
+
+msgid "Use YARA-X rules"
+msgstr "YARA-X-Regeln nutzen"
+
+msgid "With your own free Auth-Key from auth.abuse.ch, Wachposten downloads hashes of new malware every 6 hours. Nothing about your files is sent. abuse.ch allows this for non-commercial use only."
+msgstr "Mit deinem eigenen kostenlosen Auth-Key von auth.abuse.ch lädt Wachposten alle 6 Stunden Hashes neuer Schadsoftware. Über deine Dateien wird nichts gesendet. abuse.ch erlaubt das nur für nicht-kommerzielle Nutzung."
+
+msgid "YARA-X rules"
+msgstr "YARA-X-Regeln"
+
+msgid "Your home folder"
+msgstr "Dein persönlicher Ordner"
+
+msgid "agent not running – start wachposten-agent"
+msgstr "Agent läuft nicht – starte wachposten-agent"
+
+msgid "empty, first update pending"
+msgstr "leer, erste Aktualisierung steht aus"
+
+msgid "in use for Windows files, Office, PDF and archives"
+msgstr "im Einsatz für Windows-Dateien, Office, PDF und Archive"
+
+msgid "not available – install and start clamd to use it"
+msgstr "nicht verfügbar – installiere und starte clamd"
+
+msgid "not watched"
+msgstr "nicht überwacht"
+
+msgid "off – add an Auth-Key in Settings"
+msgstr "aus – trage in den Einstellungen einen Auth-Key ein"
+
+msgid "restored"
+msgstr "zurückgeholt"
+
+msgid "switched off"
+msgstr "ausgeschaltet"
+
+msgid "system daemon not running"
+msgstr "System-Daemon läuft nicht"
+
+msgid "watched by the agent ({n} entry)"
+msgid_plural "watched by the agent ({n} entries)"
+msgstr[0] "überwacht vom Agenten ({n} Eintrag)"
+msgstr[1] "überwacht vom Agenten ({n} Einträge)"
+
+msgid "watched by the system daemon"
+msgstr "überwacht vom System-Daemon"
+
+msgid "watched, known malware is blocked"
+msgstr "überwacht, bekannte Schadsoftware wird blockiert"
+
+msgid "watched, reported after the start"
+msgstr "überwacht, Meldung nach dem Start"
+
+msgid "{n} known sample"
+msgid_plural "{n} known samples"
+msgstr[0] "{n} bekannte Probe"
+msgstr[1] "{n} bekannte Proben"
+
+msgid "{n} open alert"
+msgid_plural "{n} open alerts"
+msgstr[0] "{n} offene Meldung"
+msgstr[1] "{n} offene Meldungen"
+
+msgid "{n} rule"
+msgid_plural "{n} rules"
+msgstr[0] "{n} Regel"
+msgstr[1] "{n} Regeln"

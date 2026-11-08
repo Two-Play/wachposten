@@ -68,6 +68,14 @@ CREATE TABLE IF NOT EXISTS quarantine (
 );
 ";
 
+/// A file the person allowed, remembered by its hash.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AllowedFile {
+    pub hash: String,
+    pub path: String,
+    pub added_at: i64,
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -455,6 +463,29 @@ impl Store {
             params![hash, path, now()],
         )?;
         Ok(())
+    }
+
+    /// Allowed file hashes with the path they were allowed for, newest first.
+    pub fn allowlist(&self) -> rusqlite::Result<Vec<AllowedFile>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT hash, path, added_at FROM allowlist ORDER BY added_at DESC")?;
+        stmt.query_map([], |r| {
+            Ok(AllowedFile {
+                hash: r.get(0)?,
+                path: r.get(1)?,
+                added_at: r.get(2)?,
+            })
+        })?
+        .collect()
+    }
+
+    /// Forget an allowed hash; the file is reported again next time.
+    pub fn revoke_hash(&self, hash: &str) -> rusqlite::Result<bool> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM allowlist WHERE hash = ?1", [hash])?
+            > 0)
     }
 
     pub fn is_allowed_hash(&self, hash: &str) -> rusqlite::Result<bool> {

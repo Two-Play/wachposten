@@ -94,13 +94,22 @@ impl ksni::Tray for Tray {
         }
     }
 
-    /// A left click shows the questions for all open events again.
+    /// A left click opens the window.
     fn activate(&mut self, _x: i32, _y: i32) {
-        let _ = self.tx.send(Msg::ShowOpen);
+        let _ = self.tx.send(Msg::OpenWindow);
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut items: Vec<MenuItem<Self>> = vec![
+            StandardItem {
+                label: tr("Wachposten öffnen", "Open Wachposten").into(),
+                icon_name: "security-high".into(),
+                activate: Box::new(|t: &mut Tray| {
+                    let _ = t.tx.send(Msg::OpenWindow);
+                }),
+                ..Default::default()
+            }
+            .into(),
             StandardItem {
                 label: self.summary(),
                 enabled: false,

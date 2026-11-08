@@ -14,6 +14,28 @@ pub struct Settings {
     pub downloads: Downloads,
     pub yara: Yara,
     pub hashes: Hashes,
+    pub clamav: ClamAvSettings,
+}
+
+/// ClamAV through a running clamd, for Windows programs, Office files, PDFs and archives.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClamAvSettings {
+    /// Use clamd if one runs.
+    pub enabled: bool,
+    /// The clamd socket; empty means the usual places of Fedora, Debian and Arch.
+    pub socket: Option<PathBuf>,
+    pub max_scan_mb: u64,
+}
+
+impl Default for ClamAvSettings {
+    fn default() -> Self {
+        ClamAvSettings {
+            enabled: true,
+            socket: None,
+            max_scan_mb: 100,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,6 +85,7 @@ impl Default for Settings {
                 update_hours: 6,
                 online_lookup: false,
             },
+            clamav: ClamAvSettings::default(),
         }
     }
 }
@@ -207,6 +230,7 @@ pub struct DaemonSettings {
     pub exec: ExecSettings,
     pub yara: Yara,
     pub hashes: Hashes,
+    pub clamav: ClamAvSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -230,6 +254,7 @@ impl Default for DaemonSettings {
             exec: ExecSettings::default(),
             yara: Yara::default(),
             hashes: Hashes::default(),
+            clamav: ClamAvSettings::default(),
         }
     }
 }

@@ -1,0 +1,602 @@
+// Main window of Wachposten. Texts are English and translated with @tr (see translations/).
+
+import { Button, CheckBox, GroupBox, LineEdit, ListView, Palette, ScrollView, Switch, TabWidget, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export struct EventRow {
+    id: int,
+    system: bool,
+    title: string,
+    path: string,
+    // info, notice, suspicious, malicious
+    severity: string,
+    status: string,
+    when: string,
+    can-decide: bool,
+    open: bool,
+}
+
+export struct EventDetail {
+    valid: bool,
+    row: EventRow,
+    sentence: string,
+    kind: string,
+    findings: [string],
+    lines: [string],
+    lines-title: string,
+}
+
+export struct QuarantineRow {
+    id: int,
+    system: bool,
+    path: string,
+    kind: string,
+    when: string,
+    restored: bool,
+}
+
+export struct AllowedRow {
+    hash: string,
+    system: bool,
+    path: string,
+    when: string,
+}
+
+export struct StatusInfo {
+    agent: bool,
+    daemon: bool,
+    admin: bool,
+    exec-watch: bool,
+    blocking: bool,
+    yara-rules: int,
+    known-hashes: int,
+    hash-updates: bool,
+    clamav: bool,
+    baseline: int,
+    open: int,
+}
+
+export struct SettingsData {
+    downloads: bool,
+    yara: bool,
+    rule-dirs: string,
+    key: string,
+    online: bool,
+    clamav: bool,
+}
+
+component SeverityBadge inherits Rectangle {
+    in property <string> severity;
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    background: severity == "malicious" ? #d13438 : severity == "suspicious" ? #e8820c : severity == "notice" ? #2f7de1 : #8a8a8a;
+}
+
+component StatusLine inherits HorizontalLayout {
+    in property <bool> ok;
+    in property <string> label;
+    in property <string> value;
+    spacing: 10px;
+    Rectangle {
+        width: 12px;
+        height: 12px;
+        y: (parent.height - self.height) / 2;
+        border-radius: 6px;
+        background: ok ? #2e9e44 : #c2c2c2;
+    }
+    Text {
+        text: label;
+        width: 280px;
+        vertical-alignment: center;
+    }
+    Text {
+        text: value;
+        color: Palette.foreground.transparentize(0.25);
+        vertical-alignment: center;
+        wrap: word-wrap;
+        horizontal-stretch: 1;
+    }
+}
+
+component EventList inherits ListView {
+    in property <[EventRow]> rows;
+    in-out property <int> selected: -1;
+    callback picked(EventRow);
+    for row[i] in rows: Rectangle {
+        height: 54px;
+        background: i == selected ? Palette.selection-background : touch.has-hover ? Palette.alternate-background : transparent;
+        border-radius: 4px;
+        touch := TouchArea {
+            clicked => {
+                selected = i;
+                picked(row);
+            }
+        }
+        HorizontalLayout {
+            padding: 8px;
+            spacing: 10px;
+            SeverityBadge {
+                severity: row.severity;
+                y: 8px;
+            }
+            VerticalLayout {
+                spacing: 2px;
+                Text {
+                    text: (row.system ? @tr("System") + " · " : "") + row.title;
+                    font-weight: 600;
+                    overflow: elide;
+                    color: i == selected ? Palette.selection-foreground : Palette.foreground;
+                }
+                Text {
+                    text: row.when + " · " + row.status + " · " + row.path;
+                    font-size: 11px;
+                    overflow: elide;
+                    color: (i == selected ? Palette.selection-foreground : Palette.foreground).transparentize(0.3);
+                }
+            }
+        }
+    }
+}
+
+component EventView inherits VerticalLayout {
+    in property <EventDetail> detail;
+    callback decide(int, bool, bool);
+    spacing: 10px;
+    if !detail.valid: Text {
+        text: @tr("Select an entry on the left.");
+        color: Palette.foreground.transparentize(0.4);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        vertical-stretch: 1;
+    }
+    if detail.valid: VerticalLayout {
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 10px;
+            SeverityBadge {
+                severity: detail.row.severity;
+                y: 8px;
+            }
+            Text {
+                text: detail.row.title;
+                font-size: 17px;
+                font-weight: 700;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+            }
+        }
+        Text {
+            text: detail.sentence;
+            wrap: word-wrap;
+        }
+        Text {
+            text: detail.row.path;
+            font-family: "monospace";
+            wrap: char-wrap;
+        }
+        Text {
+            text: detail.kind + " · " + detail.row.when + " · " + detail.row.status;
+            font-size: 11px;
+            color: Palette.foreground.transparentize(0.35);
+        }
+        if detail.findings.length > 0: VerticalLayout {
+            spacing: 4px;
+            for f in detail.findings: Text {
+                text: "⚠ " + f;
+                wrap: word-wrap;
+                color: detail.row.severity == "malicious" ? #d13438 : #c46a00;
+            }
+        }
+        if detail.lines.length > 0: VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: detail.lines-title;
+                font-weight: 600;
+            }
+            Rectangle {
+                background: Palette.alternate-background;
+                border-radius: 4px;
+                VerticalLayout {
+                    padding: 8px;
+                    spacing: 2px;
+                    for l in detail.lines: Text {
+                        text: l;
+                        font-family: "monospace";
+                        font-size: 12px;
+                        wrap: char-wrap;
+                    }
+                }
+            }
+        }
+        if detail.row.open && detail.row.can-decide: HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+            Button {
+                text: @tr("Remove");
+                primary: true;
+                clicked => {
+                    decide(detail.row.id, detail.row.system, false);
+                }
+            }
+            Button {
+                text: @tr("Allow");
+                clicked => {
+                    decide(detail.row.id, detail.row.system, true);
+                }
+            }
+        }
+        if detail.row.open && !detail.row.can-decide: Text {
+            text: @tr("An admin decides about this.");
+            color: Palette.foreground.transparentize(0.35);
+        }
+        Rectangle {
+            vertical-stretch: 1;
+        }
+    }
+}
+
+component EventsPage inherits HorizontalLayout {
+    in property <[EventRow]> rows;
+    in property <EventDetail> detail;
+    in property <string> empty-text;
+    callback picked(EventRow);
+    callback decide(int, bool, bool);
+    padding: 10px;
+    spacing: 14px;
+    VerticalLayout {
+        width: 46%;
+        if rows.length == 0: Text {
+            text: empty-text;
+            color: Palette.foreground.transparentize(0.4);
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            vertical-stretch: 1;
+        }
+        if rows.length > 0: EventList {
+            rows: rows;
+            picked(r) => {
+                picked(r);
+            }
+        }
+    }
+    ScrollView {
+        EventView {
+            width: parent.visible-width - 12px;
+            detail: detail;
+            decide(id, system, allow) => {
+                decide(id, system, allow);
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Wachposten";
+    icon: @image-url("icon.svg");
+    preferred-width: 1000px;
+    preferred-height: 660px;
+    min-width: 760px;
+    min-height: 480px;
+
+    in property <StatusInfo> status;
+    in property <[EventRow]> open-rows;
+    in property <[EventRow]> history-rows;
+    in property <EventDetail> open-detail;
+    in property <EventDetail> history-detail;
+    in property <[QuarantineRow]> quarantine-rows;
+    in property <[AllowedRow]> allowed-rows;
+    in-out property <SettingsData> settings;
+    in property <string> message;
+    in property <bool> message-error;
+    in-out property <int> tab: 0;
+
+    callback refresh();
+    callback check-now();
+    callback pick-open(EventRow);
+    callback pick-history(EventRow);
+    callback decide(int, bool, bool);
+    callback restore(int, bool);
+    callback revoke(string, bool);
+    callback save-settings(SettingsData);
+
+    VerticalLayout {
+        if message != "": Rectangle {
+            background: message-error ? #d13438.transparentize(0.8) : #2e9e44.transparentize(0.8);
+            HorizontalLayout {
+                padding: 8px;
+                Text {
+                    text: message;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        TabWidget {
+            current-index <=> tab;
+            Tab {
+                title: @tr("Overview");
+                ScrollView {
+                    VerticalBox {
+                        alignment: start;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Image {
+                                source: @image-url("icon.svg");
+                                width: 48px;
+                                height: 48px;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                Text {
+                                    text: status.open == 0 ? @tr("All quiet") : @tr("{n} open alert" | "{n} open alerts" % status.open);
+                                    font-size: 22px;
+                                    font-weight: 700;
+                                }
+                                Text {
+                                    text: status.open == 0 ? @tr("Nothing waits for a decision.") : @tr("Please decide on them in the Alerts tab.");
+                                    color: Palette.foreground.transparentize(0.3);
+                                }
+                            }
+                        }
+                        GroupBox {
+                            title: @tr("Protection");
+                            VerticalLayout {
+                                spacing: 8px;
+                                StatusLine {
+                                    ok: status.agent;
+                                    label: @tr("Your home folder");
+                                    value: status.agent ? @tr("watched by the agent ({n} entry)" | "watched by the agent ({n} entries)" % status.baseline) : @tr("agent not running – start wachposten-agent");
+                                }
+                                StatusLine {
+                                    ok: status.daemon;
+                                    label: @tr("System-wide");
+                                    value: status.daemon ? @tr("watched by the system daemon") : @tr("system daemon not running");
+                                }
+                                StatusLine {
+                                    ok: status.exec-watch;
+                                    label: @tr("Programs from temporary folders");
+                                    value: !status.exec-watch ? @tr("not watched") : status.blocking ? @tr("watched, known malware is blocked") : @tr("watched, reported after the start");
+                                }
+                            }
+                        }
+                        GroupBox {
+                            title: @tr("Known malware");
+                            VerticalLayout {
+                                spacing: 8px;
+                                StatusLine {
+                                    ok: status.yara-rules > 0;
+                                    label: @tr("YARA-X rules");
+                                    value: status.yara-rules > 0 ? @tr("{n} rule" | "{n} rules" % status.yara-rules) : @tr("switched off");
+                                }
+                                StatusLine {
+                                    ok: status.known-hashes > 0;
+                                    label: @tr("Hash list (MalwareBazaar)");
+                                    value: status.known-hashes > 0 ? @tr("{n} known sample" | "{n} known samples" % status.known-hashes) : status.hash-updates ? @tr("empty, first update pending") : @tr("off – add an Auth-Key in Settings");
+                                }
+                                StatusLine {
+                                    ok: status.clamav;
+                                    label: @tr("ClamAV");
+                                    value: status.clamav ? @tr("in use for Windows files, Office, PDF and archives") : @tr("not available – install and start clamd to use it");
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            alignment: start;
+                            Button {
+                                text: @tr("Check now");
+                                primary: true;
+                                clicked => {
+                                    check-now();
+                                }
+                            }
+                            if status.open > 0: Button {
+                                text: @tr("Show alerts");
+                                clicked => {
+                                    tab = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: status.open > 0 ? @tr("Alerts ({})", status.open) : @tr("Alerts");
+                EventsPage {
+                    rows: open-rows;
+                    detail: open-detail;
+                    empty-text: @tr("No open alerts.");
+                    picked(r) => {
+                        pick-open(r);
+                    }
+                    decide(id, system, allow) => {
+                        decide(id, system, allow);
+                    }
+                }
+            }
+            Tab {
+                title: @tr("History");
+                EventsPage {
+                    rows: history-rows;
+                    detail: history-detail;
+                    empty-text: @tr("Nothing recorded yet.");
+                    picked(r) => {
+                        pick-history(r);
+                    }
+                    decide(id, system, allow) => {
+                        decide(id, system, allow);
+                    }
+                }
+            }
+            Tab {
+                title: @tr("Quarantine");
+                VerticalBox {
+                    Text {
+                        text: @tr("Removed files are kept here and can be put back.");
+                        color: Palette.foreground.transparentize(0.3);
+                    }
+                    if quarantine-rows.length == 0: Text {
+                        text: @tr("The quarantine is empty.");
+                        color: Palette.foreground.transparentize(0.4);
+                        vertical-stretch: 1;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if quarantine-rows.length > 0: ListView {
+                        for q in quarantine-rows: HorizontalLayout {
+                            padding: 6px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: (q.system ? @tr("System") + " · " : "") + q.path;
+                                    overflow: elide;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: q.when + " · " + q.kind + (q.restored ? " · " + @tr("restored") : "");
+                                    font-size: 11px;
+                                    color: Palette.foreground.transparentize(0.35);
+                                }
+                            }
+                            Button {
+                                text: @tr("Put back");
+                                enabled: !q.restored;
+                                clicked => {
+                                    restore(q.id, q.system);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: @tr("Allowed");
+                VerticalBox {
+                    Text {
+                        text: @tr("Downloads and programs you allowed. They are not reported again unless you revoke them. Allowed changes to autostart and other entries became the new normal state.");
+                        wrap: word-wrap;
+                        color: Palette.foreground.transparentize(0.3);
+                    }
+                    if allowed-rows.length == 0: Text {
+                        text: @tr("Nothing allowed yet.");
+                        color: Palette.foreground.transparentize(0.4);
+                        vertical-stretch: 1;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    if allowed-rows.length > 0: ListView {
+                        for a in allowed-rows: HorizontalLayout {
+                            padding: 6px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: (a.system ? @tr("System") + " · " : "") + a.path;
+                                    overflow: elide;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: a.when + " · SHA-256 " + a.hash;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                    color: Palette.foreground.transparentize(0.35);
+                                }
+                            }
+                            Button {
+                                text: @tr("Revoke");
+                                clicked => {
+                                    revoke(a.hash, a.system);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Tab {
+                title: @tr("Settings");
+                ScrollView {
+                    VerticalBox {
+                        alignment: start;
+                        GroupBox {
+                            title: @tr("Scanning");
+                            VerticalLayout {
+                                spacing: 8px;
+                                Switch {
+                                    text: @tr("Scan new downloads");
+                                    checked: settings.downloads;
+                                    toggled => {
+                                        settings.downloads = self.checked;
+                                    }
+                                }
+                                Switch {
+                                    text: @tr("Use YARA-X rules");
+                                    checked: settings.yara;
+                                    toggled => {
+                                        settings.yara = self.checked;
+                                    }
+                                }
+                                Text {
+                                    text: @tr("Extra rule folders (separated by commas):");
+                                }
+                                LineEdit {
+                                    text: settings.rule-dirs;
+                                    placeholder-text: "/home/you/yara-rules";
+                                    edited(t) => {
+                                        settings.rule-dirs = t;
+                                    }
+                                }
+                                Switch {
+                                    text: @tr("Use ClamAV when clamd runs");
+                                    checked: settings.clamav;
+                                    toggled => {
+                                        settings.clamav = self.checked;
+                                    }
+                                }
+                            }
+                        }
+                        GroupBox {
+                            title: @tr("Hash list (MalwareBazaar)");
+                            VerticalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: @tr("With your own free Auth-Key from auth.abuse.ch, Wachposten downloads hashes of new malware every 6 hours. Nothing about your files is sent. abuse.ch allows this for non-commercial use only.");
+                                    wrap: word-wrap;
+                                }
+                                LineEdit {
+                                    text: settings.key;
+                                    input-type: password;
+                                    placeholder-text: @tr("Auth-Key");
+                                    edited(t) => {
+                                        settings.key = t;
+                                    }
+                                }
+                                Switch {
+                                    text: @tr("Also look up single files online (sends their SHA-256 hash)");
+                                    checked: settings.online;
+                                    toggled => {
+                                        settings.online = self.checked;
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            text: @tr("Settings apply to your agent. System-wide settings are in /etc/wachposten/daemon.toml.");
+                            wrap: word-wrap;
+                            color: Palette.foreground.transparentize(0.35);
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: @tr("Save");
+                                primary: true;
+                                clicked => {
+                                    save-settings(settings);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

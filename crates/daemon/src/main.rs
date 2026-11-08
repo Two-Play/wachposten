@@ -304,7 +304,32 @@ impl Daemon {
                     .as_ref()
                     .and_then(|h| h.count().ok())
                     .unwrap_or(0),
+                clamav: self
+                    .scanner
+                    .clamav
+                    .as_ref()
+                    .is_some_and(|c| c.ping().is_ok()),
             },
+            Request::Allowlist => Reply::Allowlist {
+                items: if admin {
+                    self.guard.store().allowlist()?
+                } else {
+                    Vec::new()
+                },
+            },
+            Request::Revoke { hash } => {
+                if !admin {
+                    return Ok(Reply::Error {
+                        message: "only admins may change the system allowlist".into(),
+                    });
+                }
+                if self.guard.store().revoke_hash(&hash)? {
+                    log::info!("allowed hash {hash} revoked by {}", users::name(uid));
+                }
+                Reply::Done {
+                    message: "revoked".into(),
+                }
+            }
             Request::Events { all, limit } => {
                 let events = if all {
                     self.guard.store().recent_events(limit.clamp(1, 1000))?
@@ -413,7 +438,8 @@ fn main() -> Result<()> {
         .online_lookup
         .then(|| settings.hashes.malwarebazaar_auth_key.clone())
         .flatten();
-    let scanner = Arc::new(MalwareScanner::new(yara, hashes, online_key, 256));
+    let scanner =
+        Arc::new(MalwareScanner::new(yara, hashes, online_key, 256).with_clamav(&settings.clamav));
     guard.set_scanner(scanner.clone());
 
     if !guard.is_initialized()? {

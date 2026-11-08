@@ -40,6 +40,7 @@ pub enum Msg {
     Tick,
     Rescan,
     ShowOpen,
+    OpenWindow,
     /// A file in a download folder matched a malware signature or hash.
     Detection {
         path: PathBuf,
@@ -362,6 +363,12 @@ fn main() -> Result<()> {
         let result = match msg {
             Msg::Changed | Msg::Tick | Msg::Rescan => agent.rescan(),
             Msg::ShowOpen => agent.show_open(),
+            Msg::OpenWindow => {
+                let alerts =
+                    !agent.remote.is_empty() || !agent.guard.store().open_events()?.is_empty();
+                open_window(alerts);
+                Ok(())
+            }
             Msg::Detection { path, findings } => agent.detection(&path, &findings),
             Msg::Decide {
                 id,
@@ -471,4 +478,21 @@ fn follow_daemon(tx: &Sender<Msg>) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Start the window (`wachposten` next to this program, or from `PATH`).
+fn open_window(alerts: bool) {
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("wachposten")))
+        .filter(|p| p.exists());
+    let program = beside.unwrap_or_else(|| PathBuf::from("wachposten"));
+    let mut cmd = std::process::Command::new(&program);
+    cmd.arg("window");
+    if alerts {
+        cmd.args(["--tab", "alerts"]);
+    }
+    if let Err(e) = cmd.spawn() {
+        log::error!("cannot open the window ({}): {e}", program.display());
+    }
 }

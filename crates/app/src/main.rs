@@ -28,6 +28,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Open the window (also what `wachposten` without a command does on a desktop).
+    Window {
+        /// Page to show first.
+        #[arg(long, value_parser = ["overview", "alerts", "history", "quarantine", "allowed", "settings"])]
+        tab: Option<String>,
+    },
     /// Show whether the agent runs and how many entries and events there are.
     Status,
     /// List events (open ones by default).
@@ -125,7 +131,7 @@ fn pretty(home: &Path, path: &str) -> String {
     }
 }
 
-fn agent_running(config: &Config) -> bool {
+pub(crate) fn agent_running(config: &Config) -> bool {
     let Ok(file) = File::open(config.lock_path()) else {
         return false;
     };
@@ -245,6 +251,12 @@ fn config_cmd(config: &Config, action: Option<ConfigAction>) -> Result<()> {
     Ok(())
 }
 
+mod gui;
+
+fn has_display() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
+}
+
 fn socket_path() -> PathBuf {
     std::env::var_os("WACHPOSTEN_SOCKET").map_or_else(|| PathBuf::from(ipc::SOCKET), PathBuf::from)
 }
@@ -274,6 +286,7 @@ fn system_cmd(command: Command) -> Result<()> {
                 blocking,
                 yara_rules,
                 known_hashes,
+                clamav,
             } = daemon(&Request::Status)?
             {
                 println!("daemon:         running");
@@ -293,6 +306,10 @@ fn system_cmd(command: Command) -> Result<()> {
                 );
                 println!("YARA-X rules:   {yara_rules}");
                 println!("known hashes:   {known_hashes}");
+                println!(
+                    "ClamAV:         {}",
+                    if clamav { "in use" } else { "not available" }
+                );
             }
         }
         Command::Events { all, limit } => {
@@ -365,6 +382,9 @@ fn print_quarantine(home: &Path, items: &[wachposten_core::QuarantineItem]) {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.command.is_none() && !cli.system && has_display() {
+        return gui::run(None);
+    }
     if cli.system {
         return system_cmd(cli.command.unwrap_or(Command::Status));
     }
@@ -373,6 +393,7 @@ fn main() -> Result<()> {
     let home = config.home.clone();
 
     match cli.command.unwrap_or(Command::Status) {
+        Command::Window { tab } => return gui::run(tab.as_deref()),
         Command::Status => {
             let open = guard.store().open_events()?;
             println!(

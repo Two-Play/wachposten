@@ -23,3 +23,10 @@ extra_rule_dirs = []
 # malwarebazaar_auth_key = "..."   # from https://auth.abuse.ch/, non-commercial use only
 update_hours = 6
 online_lookup = false
+
+[clamav]
+# Use a running clamd for Windows programs, Office files, PDFs and archives (not while a start
+# is held up). The socket is found in the usual places unless given.
+enabled = true
+# socket = "/run/clamd.scan/clamd.sock"
+max_scan_mb = 100

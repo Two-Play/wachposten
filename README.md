@@ -14,8 +14,9 @@ Known malware is recognised in later stages with YARA-X rules and hash lists, an
 be added for Windows files and mail attachments. The core is the persistence and behaviour
 watch, because no maintained open signature database for Linux desktop malware exists.
 
-**Status: stage 3 of 5.** The agent watches the home directory and scans downloads; the root
-daemon watches system-wide locations and program starts from temporary folders. See [Roadmap](#roadmap).
+**Status: stage 4 of 5.** The agent watches the home directory and scans downloads; the root
+daemon watches system-wide locations and program starts from temporary folders; a window shows
+it all. See [Roadmap](#roadmap).
 
 ## What is watched (stage 1)
 
@@ -114,6 +115,27 @@ sudo systemctl daemon-reload && sudo systemctl enable --now wachposten-daemon
 wachposten --system status
 ```
 
+## Window and ClamAV (stage 4)
+
+`wachposten` without a command opens the window (Slint, follows the light or dark desktop
+theme, German or English). A click on the tray icon opens it too, on the alerts page when
+something waits. Pages:
+
+- **Overview** – what is watched, rules, hash list and ClamAV, open alerts
+- **Alerts** – open events of your agent and of the system daemon, with Allow and Remove
+- **History**, **Quarantine** (put back), **Allowed** (revoke an allowed file)
+- **Settings** – downloads, YARA-X, extra rule folders, Auth-Key, online lookup, ClamAV; saving
+  restarts the agent when it runs as a systemd user service
+
+`wachposten window --tab alerts|history|quarantine|allowed|settings` opens a given page.
+
+**ClamAV** is used when a `clamd` socket is found (Fedora, Debian and Arch locations, or
+`[clamav] socket` in the settings). Files are streamed to clamd, so it needs no access to them.
+Only Windows programs, Office files, PDFs, RTF, archives and Windows scripts are sent; Linux
+programs are left to YARA-X. ClamAV is skipped while a program start is held up. On Fedora the
+clamd socket belongs to the `virusgroup` group, so the agent needs that group or uses the
+daemon's scans.
+
 ## Usage
 
 ```bash
@@ -166,7 +188,7 @@ starts with `de`, English otherwise.
 1. **Persistence in the home directory** – agent, tray, notifications, CLI *(done)*
 2. **Downloads, hashes, YARA-X** – scan new downloads, local MalwareBazaar hash list (opt-in), curated YARA-X rules *(done)*
 3. **Daemon** – fanotify for program starts from `/tmp`, `/var/tmp`, `/dev/shm`, `~/.cache`; system locations such as `/etc/ld.so.preload`, `/etc/cron*`, `/etc/systemd/system` *(done)*
-4. **Slint window and ClamAV** – history, allowed entries, quarantine, settings; optional ClamAV via `clamd`
+4. **Slint window and ClamAV** – history, allowed entries, quarantine, settings; optional ClamAV via `clamd` *(done)*
 5. **eBPF and packages** – process starts through interpreters and `memfd`, which program changed a file, RPM
 
 ## Development
@@ -180,7 +202,7 @@ cargo fmt --check
 The workspace has `crates/core` (baseline, analysis, decisions, settings, IPC, SQLite),
 `crates/watch` (inotify), `crates/scan` (YARA-X, hash list, MalwareBazaar), `crates/daemon`
 (fanotify, system locations, socket), `crates/agent` (tray and notifications) and `crates/app`
-(CLI, later the window).
+(CLI and the Slint window; texts in `ui/`, German in `translations/`).
 
 `test/vm.py` boots a Fedora Cloud VM with QEMU (no root needed on the host), installs the
 daemon as a systemd service and checks blocking, program start reports, system persistence,

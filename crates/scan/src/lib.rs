@@ -2,6 +2,7 @@
 //! [`FileScanner`](wachposten_core::FileScanner) trait.
 
 pub mod bazaar;
+pub mod clamav;
 pub mod hashdb;
 pub mod yara;
 
@@ -40,6 +41,7 @@ impl Detection {
         let source = match self.source {
             "yara" => "YARA",
             "hashlist" => "MalwareBazaar",
+            "clamav" => "ClamAV",
             _ => "MalwareBazaar online",
         };
         match &self.description {
@@ -70,6 +72,7 @@ pub fn hash_db_path(data_dir: &Path) -> PathBuf {
 pub struct MalwareScanner {
     pub yara: Option<YaraEngine>,
     pub hashes: Option<HashDb>,
+    pub clamav: Option<clamav::ClamAv>,
     online_key: Option<String>,
     max_scan_bytes: u64,
 }
@@ -84,6 +87,7 @@ impl MalwareScanner {
         MalwareScanner {
             yara,
             hashes,
+            clamav: None,
             online_key,
             max_scan_bytes: max_scan_mb.saturating_mul(1024 * 1024),
         }
@@ -107,6 +111,22 @@ impl MalwareScanner {
             .then(|| settings.hashes.malwarebazaar_auth_key.clone())
             .flatten();
         MalwareScanner::new(yara, hashes, online_key, settings.downloads.max_scan_mb)
+            .with_clamav(&settings.clamav)
+    }
+
+    /// Add ClamAV if it is switched on and a clamd socket exists.
+    pub fn with_clamav(mut self, settings: &wachposten_core::settings::ClamAvSettings) -> Self {
+        if settings.enabled {
+            self.clamav = clamav::ClamAv::find(settings.socket.as_deref(), settings.max_scan_mb);
+            match &self.clamav {
+                Some(c) => match c.ping() {
+                    Ok(()) => log::info!("ClamAV at {}", c.socket().display()),
+                    Err(e) => log::info!("ClamAV not usable: {e:#}"),
+                },
+                None => log::info!("no clamd found; ClamAV is not used"),
+            }
+        }
+        self
     }
 
     /// Check one regular file. Errors are logged; an unreadable file gives no detections.
@@ -157,6 +177,21 @@ impl MalwareScanner {
                     }
                 }
                 Err(e) => log::warn!("hash lookup failed: {e:#}"),
+            }
+        }
+
+        // ClamAV is a network round trip and slow on large files: not while a start waits.
+        if let Some(clam) = &self.clamav
+            && budget.is_none()
+        {
+            match clam.scan(path) {
+                Ok(Some(name)) => out.push(Detection {
+                    source: "clamav",
+                    name,
+                    description: None,
+                }),
+                Ok(None) => {}
+                Err(e) => log::debug!("ClamAV scan of {} failed: {e:#}", path.display()),
             }
         }
 

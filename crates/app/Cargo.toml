@@ -12,9 +12,16 @@ workspace = true
 name = "wachposten"
 path = "src/main.rs"
 
+[build-dependencies]
+slint-build = "1.18"
+
 [dependencies]
+# Without "system-tray": its ksni build clashes with the one of the agent, which has its own tray.
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility"] }
+
 wachposten-core.workspace = true
 wachposten-scan.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 toml.workspace = true

@@ -51,6 +51,11 @@ pub enum Request {
         id: i64,
         force: bool,
     },
+    /// Allowed program and download hashes.
+    Allowlist,
+    Revoke {
+        hash: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,9 +81,14 @@ pub enum Reply {
         blocking: bool,
         yara_rules: usize,
         known_hashes: i64,
+        #[serde(default)]
+        clamav: bool,
     },
     Quarantine {
         items: Vec<QuarantineItem>,
+    },
+    Allowlist {
+        items: Vec<crate::store::AllowedFile>,
     },
     Done {
         message: String,
