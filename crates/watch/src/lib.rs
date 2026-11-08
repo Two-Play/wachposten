@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod files;
+
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 

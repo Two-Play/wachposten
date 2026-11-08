@@ -47,6 +47,7 @@ pub fn kind_label(kind: Kind) -> &'static str {
         Kind::Environment => tr("Umgebungsvariablen", "environment variables"),
         Kind::Ssh => tr("SSH-Zugang", "SSH access"),
         Kind::Crontab => tr("Zeitgesteuerte Aufgabe (cron)", "scheduled task (cron)"),
+        Kind::Download => tr("Download", "download"),
     }
 }
 
@@ -90,6 +91,7 @@ pub fn rule_label(rule: &str) -> &'static str {
             "starts a program from a hidden folder",
         ),
         "binary" => tr("ist eine Programmdatei, kein Text", "is a binary, not text"),
+        "malware" => tr("bekannte Schadsoftware", "known malware"),
         _ => tr("auffälliger Inhalt", "suspicious content"),
     }
 }
@@ -98,6 +100,10 @@ pub fn rule_label(rule: &str) -> &'static str {
 pub fn event_title(ev: &Event) -> String {
     let name = display_name(&ev.path);
     match (ev.kind, ev.change) {
+        (Kind::Download, _) => format!(
+            "{}: {name}",
+            tr("Schadsoftware erkannt", "Malware detected")
+        ),
         (Kind::Autostart, Change::Created) => {
             tr("Neuer Autostart-Eintrag", "New autostart entry").into()
         }
@@ -146,6 +152,10 @@ pub fn event_sentence(ev: &Event) -> &'static str {
         (Kind::Crontab, _) => tr(
             "Eine Aufgabe soll regelmäßig automatisch laufen.",
             "A task is set to run automatically on a schedule.",
+        ),
+        (Kind::Download, _) => tr(
+            "Eine heruntergeladene Datei ist als Schadsoftware bekannt. Öffne sie nicht.",
+            "A downloaded file is known malware. Do not open it.",
         ),
     }
 }

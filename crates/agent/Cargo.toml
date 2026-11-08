@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 wachposten-core.workspace = true
+wachposten-scan.workspace = true
 wachposten-watch.workspace = true
 anyhow.workspace = true
 ksni.workspace = true

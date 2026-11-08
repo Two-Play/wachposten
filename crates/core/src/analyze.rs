@@ -152,6 +152,44 @@ fn command_in_hidden_dir(cmdline: &str) -> bool {
         .any(|c| c.starts_with('.') && !matches!(*c, "." | ".." | ".local" | ".config"))
 }
 
+/// Programs started by `Exec=` / `ExecStart=` style lines, with `%h`, `~` and `$HOME` expanded.
+/// Only absolute paths are returned; bare command names are left to `PATH`.
+pub fn referenced_programs(entry: &Entry, home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Some(text) = entry.text() else {
+        return Vec::new();
+    };
+    let home = home.to_string_lossy();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(caps) = EXEC_LINE.captures(line) else {
+            continue;
+        };
+        let program = caps[2]
+            .trim_start_matches(['-', '@', '!', '+', ':'])
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(['"', '\'']);
+        let expanded = if let Some(rest) = program.strip_prefix("%h") {
+            format!("{home}{rest}")
+        } else if let Some(rest) = program.strip_prefix("~/") {
+            format!("{home}/{rest}")
+        } else if let Some(rest) = program
+            .strip_prefix("$HOME")
+            .or_else(|| program.strip_prefix("${HOME}"))
+        {
+            format!("{home}{rest}")
+        } else {
+            program.to_string()
+        };
+        let path = std::path::PathBuf::from(expanded);
+        if path.is_absolute() && !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

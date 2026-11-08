@@ -28,7 +28,7 @@ impl OpenItem {
                 format!("{title} ({name})")
             },
             hash: ev.new_hash().to_string(),
-            suspicious: ev.severity == Severity::Suspicious,
+            suspicious: ev.severity >= Severity::Suspicious,
         }
     }
 }

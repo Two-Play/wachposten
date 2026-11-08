@@ -20,10 +20,12 @@ pub enum Kind {
     Ssh,
     /// The user's crontab.
     Crontab,
+    /// A file in a download folder that matched a malware signature or hash.
+    Download,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] = [
+    pub const ALL: [Kind; 8] = [
         Kind::Autostart,
         Kind::SystemdUser,
         Kind::ShellRc,
@@ -31,6 +33,7 @@ impl Kind {
         Kind::Environment,
         Kind::Ssh,
         Kind::Crontab,
+        Kind::Download,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -42,6 +45,7 @@ impl Kind {
             Kind::Environment => "environment",
             Kind::Ssh => "ssh",
             Kind::Crontab => "crontab",
+            Kind::Download => "download",
         }
     }
 }
@@ -147,6 +151,8 @@ pub enum Severity {
     Notice,
     /// At least one rule matched.
     Suspicious,
+    /// A malware signature or hash matched.
+    Malicious,
 }
 
 impl Severity {
@@ -155,6 +161,7 @@ impl Severity {
             Severity::Info => "info",
             Severity::Notice => "notice",
             Severity::Suspicious => "suspicious",
+            Severity::Malicious => "malicious",
         }
     }
 }
@@ -166,6 +173,7 @@ impl FromStr for Severity {
             "info" => Ok(Severity::Info),
             "notice" => Ok(Severity::Notice),
             "suspicious" => Ok(Severity::Suspicious),
+            "malicious" => Ok(Severity::Malicious),
             _ => Err(format!("unknown severity {s:?}")),
         }
     }

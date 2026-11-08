@@ -6,6 +6,7 @@ use std::thread;
 
 use notify_rust::{Notification, Timeout, Urgency};
 use wachposten_core::i18n::{self, tr};
+use wachposten_core::scanner::MALWARE_RULE;
 use wachposten_core::{Entry, Event, Severity};
 
 use crate::{Decision, Msg};
@@ -47,7 +48,13 @@ pub fn body(home: &Path, ev: &Event) -> String {
         out.push(format!("→ {}", escape(target)));
     }
     for finding in &ev.findings {
-        out.push(format!("⚠ {}", escape(i18n::rule_label(&finding.rule))));
+        if finding.rule == MALWARE_RULE {
+            // The line names the signature; the path is already shown above.
+            let name = finding.line.split(" – ").next().unwrap_or(&finding.line);
+            out.push(format!("⛔ {}", escape(&shorten(name))));
+        } else {
+            out.push(format!("⚠ {}", escape(i18n::rule_label(&finding.rule))));
+        }
     }
     if !ev.added_lines.is_empty() {
         out.push(String::new());
@@ -89,7 +96,7 @@ pub fn ask(home: &Path, ev: &Event, tx: Sender<Msg>) {
         .action("allow", i18n::action_allow())
         .action("later", i18n::action_later())
         .timeout(Timeout::Never);
-    if ev.severity == Severity::Suspicious {
+    if ev.severity >= Severity::Suspicious {
         n.icon("security-low").urgency(Urgency::Critical);
     } else {
         n.icon("security-medium").urgency(Urgency::Normal);

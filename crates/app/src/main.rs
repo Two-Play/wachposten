@@ -2,12 +2,14 @@
 //! The Slint window follows in a later stage.
 
 use std::fs::{File, TryLockError};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use wachposten_core::i18n;
-use wachposten_core::{Config, Entry, Event, Guard, Outcome, Status};
+use wachposten_core::settings::settings_path;
+use wachposten_core::{Config, Entry, Event, Guard, Outcome, Settings, Status};
+use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, bazaar, hash_db_path};
 
 #[derive(Parser)]
 #[command(
@@ -50,6 +52,53 @@ enum Command {
     },
     /// Compare everything with the baseline now and record changes.
     Scan,
+    /// Check files for known malware (YARA-X and the hash list) without recording anything.
+    ScanFile {
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+    },
+    /// Show the YARA-X rule files and whether they compiled.
+    Rules,
+    /// Manage the local list of known malware hashes (MalwareBazaar).
+    Hashes {
+        #[command(subcommand)]
+        action: HashAction,
+    },
+    /// Show or change settings.
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum HashAction {
+    /// Number of hashes and the time of the last update.
+    Status,
+    /// Download the hashes of the last 48 hours now (needs an Auth-Key).
+    Update,
+    /// Import a list downloaded by hand (CSV, plain text or ZIP).
+    Import { file: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Print the settings file.
+    Show,
+    /// Store your MalwareBazaar Auth-Key from https://auth.abuse.ch/ (enables hash list updates).
+    SetKey { key: String },
+    /// Remove the Auth-Key; no more downloads from MalwareBazaar.
+    UnsetKey,
+    /// Also look up single files online. This sends their SHA-256 hash to MalwareBazaar.
+    OnlineLookup {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
+    /// Switch download scanning on or off.
+    Downloads {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
 }
 
 fn date(ts: i64) -> String {
@@ -128,6 +177,60 @@ fn show(guard: &Guard, id: i64) -> Result<()> {
             println!("  + {l}");
         }
     }
+    Ok(())
+}
+
+fn hash_status(config: &Config) -> Result<()> {
+    let db = HashDb::open(&hash_db_path(&config.data_dir))?;
+    println!("known hashes: {}", db.count()?);
+    for (key, label) in [
+        ("updated_at", "last update"),
+        ("imported_at", "last import"),
+    ] {
+        if let Some(ts) = db.meta(key)?.and_then(|v| v.parse().ok()) {
+            println!("{label}: {}", date(ts));
+        }
+    }
+    Ok(())
+}
+
+const PRIVACY_NOTE: &str = "Wachposten only downloads lists from MalwareBazaar; it sends nothing about your files.\n\
+abuse.ch allows free use for non-commercial purposes only.";
+
+fn config_cmd(config: &Config, action: Option<ConfigAction>) -> Result<()> {
+    let home = &config.home;
+    let mut settings = Settings::load(home)?;
+    let on = |s: &str| s == "on";
+    match action.unwrap_or(ConfigAction::Show) {
+        ConfigAction::Show => {
+            println!("# {}", settings_path(home).display());
+            let mut shown = settings.clone();
+            if let Some(k) = &mut shown.hashes.malwarebazaar_auth_key {
+                *k = format!("{}…", k.chars().take(4).collect::<String>());
+            }
+            print!("{}", toml::to_string_pretty(&shown)?);
+            return Ok(());
+        }
+        ConfigAction::SetKey { key } => {
+            settings.hashes.malwarebazaar_auth_key = Some(key.trim().to_string());
+            println!("{PRIVACY_NOTE}");
+        }
+        ConfigAction::UnsetKey => settings.hashes.malwarebazaar_auth_key = None,
+        ConfigAction::OnlineLookup { state } => {
+            settings.hashes.online_lookup = on(&state);
+            if on(&state) {
+                println!(
+                    "Online lookups send the SHA-256 hash of scanned files (never the files) to MalwareBazaar."
+                );
+                if settings.hashes.malwarebazaar_auth_key.is_none() {
+                    println!("They need an Auth-Key: wachposten config set-key <key>");
+                }
+            }
+        }
+        ConfigAction::Downloads { state } => settings.downloads.enabled = on(&state),
+    }
+    settings.save(home)?;
+    println!("saved; restart the agent to apply: systemctl --user restart wachposten-agent");
     Ok(())
 }
 
@@ -212,6 +315,59 @@ fn main() -> Result<()> {
             let path = guard.restore(id, force)?;
             println!("restored {}", pretty(&home, &path));
         }
+        Command::ScanFile { paths } => {
+            let settings = Settings::load(&home)?;
+            let scanner = MalwareScanner::from_settings(&settings, &config.data_dir);
+            let mut hits = 0;
+            for path in &paths {
+                let detections = scanner.scan_path(path);
+                if detections.is_empty() {
+                    println!("clean     {}", path.display());
+                }
+                for d in detections {
+                    hits += 1;
+                    println!("MALWARE   {}  {}", path.display(), d.label());
+                }
+            }
+            if hits > 0 {
+                std::process::exit(1);
+            }
+        }
+        Command::Rules => {
+            let settings = Settings::load(&home)?;
+            let engine = YaraEngine::new(&settings.yara.extra_rule_dirs);
+            for src in &engine.sources {
+                let place = src
+                    .path
+                    .as_ref()
+                    .map_or("built in".into(), |p| p.display().to_string());
+                match &src.result {
+                    Ok(()) => println!("ok       {:<24} {place}", src.name),
+                    Err(e) => println!("skipped  {:<24} {place}\n         {e}", src.name),
+                }
+            }
+            println!("{} rules loaded", engine.rule_count());
+        }
+        Command::Hashes { action } => match action {
+            HashAction::Status => hash_status(&config)?,
+            HashAction::Update => {
+                let settings = Settings::load(&home)?;
+                let Some(key) = settings.hashes.malwarebazaar_auth_key else {
+                    bail!(
+                        "no Auth-Key; get one at https://auth.abuse.ch/ and run: wachposten config set-key <key>"
+                    );
+                };
+                let db = HashDb::open(&hash_db_path(&config.data_dir))?;
+                let (got, new) = bazaar::update_recent(&db, &key)?;
+                println!("received {got} hashes, {new} new");
+            }
+            HashAction::Import { file } => {
+                let db = HashDb::open(&hash_db_path(&config.data_dir))?;
+                let (got, new) = bazaar::import_file(&db, &file)?;
+                println!("read {got} hashes, {new} new");
+            }
+        },
+        Command::Config { action } => config_cmd(&config, action)?,
         Command::Scan => {
             if !guard.is_initialized()? {
                 let n = guard.initialize()?;

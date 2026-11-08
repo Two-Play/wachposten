@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS events (
     quarantine_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS events_open ON events (status, path);
+CREATE TABLE IF NOT EXISTS allowlist (
+    hash TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    added_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS quarantine (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at INTEGER NOT NULL,
@@ -414,6 +419,26 @@ impl Store {
             .conn
             .prepare(&format!("SELECT {EVENT_COLS} FROM events {tail}"))?;
         stmt.query_map(p, event_from_row)?.collect()
+    }
+
+    /// Remember a file hash the person allowed, so it is not reported again.
+    pub fn allow_hash(&self, hash: &str, path: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO allowlist (hash, path, added_at) VALUES (?1, ?2, ?3)",
+            params![hash, path, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn is_allowed_hash(&self, hash: &str) -> rusqlite::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM allowlist WHERE hash = ?1",
+                [hash],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
     }
 
     pub fn insert_quarantine(&self, q: &QuarantineItem) -> rusqlite::Result<i64> {

@@ -14,5 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 wachposten-core.workspace = true
+wachposten-scan.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+toml.workspace = true

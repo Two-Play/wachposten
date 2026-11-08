@@ -5,6 +5,8 @@ mod notify;
 mod tray;
 
 use std::fs::{File, TryLockError};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 use std::time::Duration;
@@ -12,7 +14,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use ksni::blocking::TrayMethods;
 use wachposten_core::i18n::tr;
-use wachposten_core::{Config, DecisionError, Event, Guard, Kind, Outcome};
+use wachposten_core::{
+    Config, DecisionError, Event, FileScanner, Finding, Guard, Kind, Outcome, Settings,
+};
+use wachposten_scan::MalwareScanner;
 
 /// How often everything is checked even without inotify events (crontab, missed events).
 const TICK: Duration = Duration::from_secs(60);
@@ -31,6 +36,11 @@ pub enum Msg {
     Tick,
     Rescan,
     ShowOpen,
+    /// A file in a download folder matched a malware signature or hash.
+    Detection {
+        path: PathBuf,
+        findings: Vec<Finding>,
+    },
     Decide {
         id: i64,
         hash: String,
@@ -74,6 +84,14 @@ impl Agent {
             );
         }
         self.ask(&events);
+        self.refresh()
+    }
+
+    fn detection(&mut self, path: &std::path::Path, findings: &[Finding]) -> Result<()> {
+        if let Some(ev) = self.guard.record_detection(path, findings)? {
+            log::warn!("malware in {}: {:?}", path.display(), ev.findings);
+            self.ask(std::slice::from_ref(&ev));
+        }
         self.refresh()
     }
 
@@ -159,6 +177,21 @@ fn main() -> Result<()> {
         Err(TryLockError::Error(e)) => return Err(e).context("cannot lock"),
     }
 
+    let settings = Settings::load(&config.home).unwrap_or_else(|e| {
+        log::error!("{e:#}; using default settings");
+        notify::info(
+            tr("Einstellungen fehlerhaft", "Settings invalid"),
+            &format!("{e:#}"),
+            "dialog-error",
+        );
+        Settings::default()
+    });
+    let scanner = Arc::new(MalwareScanner::from_settings(&settings, &config.data_dir));
+    if let Some(yara) = &scanner.yara {
+        log::info!("YARA-X: {} rules", yara.rule_count());
+    }
+    guard.set_scanner(scanner.clone());
+
     let first_run = !guard.is_initialized()?;
     if first_run {
         let count = guard.initialize()?;
@@ -182,6 +215,13 @@ fn main() -> Result<()> {
         let _ = watch_tx.send(Msg::Changed);
     })?;
     watch.set_specs(guard.watch_specs());
+
+    if settings.downloads.enabled {
+        spawn_download_scanner(&settings, &config, scanner.clone(), tx.clone())?;
+    }
+    if let Some(key) = settings.hashes.malwarebazaar_auth_key.clone() {
+        spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
+    }
 
     let tick_tx = tx.clone();
     thread::spawn(move || {
@@ -225,6 +265,7 @@ fn main() -> Result<()> {
         let result = match msg {
             Msg::Changed | Msg::Tick | Msg::Rescan => agent.rescan(),
             Msg::ShowOpen => agent.show_open(),
+            Msg::Detection { path, findings } => agent.detection(&path, &findings),
             Msg::Decide { id, hash, decision } => agent.decide(id, &hash, decision),
             Msg::Quit => break,
         };
@@ -236,4 +277,57 @@ fn main() -> Result<()> {
         tray.shutdown().wait();
     }
     Ok(())
+}
+
+/// Scan finished downloads in a worker thread; detections go to the main loop.
+fn spawn_download_scanner(
+    settings: &Settings,
+    config: &Config,
+    scanner: Arc<MalwareScanner>,
+    tx: Sender<Msg>,
+) -> Result<()> {
+    let (file_tx, file_rx) = mpsc::channel::<PathBuf>();
+    thread::Builder::new().name("scan".into()).spawn(move || {
+        for path in file_rx {
+            let findings = scanner.scan(&path);
+            log::info!("scanned {}: {} findings", path.display(), findings.len());
+            if !findings.is_empty() && tx.send(Msg::Detection { path, findings }).is_err() {
+                break;
+            }
+        }
+    })?;
+    wachposten_watch::files::spawn_files(settings.download_dirs(&config.home), move |path| {
+        let _ = file_tx.send(path);
+    })?;
+    Ok(())
+}
+
+/// Fetch the recent MalwareBazaar hashes now and then. The list covers 48 hours, so an
+/// interval below that loses nothing.
+fn spawn_hash_updates(scanner: Arc<MalwareScanner>, key: String, hours: u64) {
+    let interval = Duration::from_secs(hours.clamp(1, 24) * 3600);
+    thread::spawn(move || {
+        let Some(db) = scanner.hashes.as_ref() else {
+            return;
+        };
+        loop {
+            let last: i64 = db
+                .meta("updated_at")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let now = wachposten_core::store::now();
+            let due = last + interval.as_secs() as i64;
+            if now >= due {
+                match wachposten_scan::bazaar::update_recent(db, &key) {
+                    Ok((got, new)) => log::info!("MalwareBazaar: {got} hashes, {new} new"),
+                    Err(e) => log::warn!("{e:#}"),
+                }
+                thread::sleep(interval);
+            } else {
+                thread::sleep(Duration::from_secs((due - now) as u64));
+            }
+        }
+    });
 }

@@ -7,12 +7,16 @@ use std::io;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
 use crate::analyze;
 use crate::crontab::{CrontabBackend, NoCrontab, SystemCrontab};
-use crate::model::{Change, Entry, Event, Kind, QuarantineItem, Severity, Status, hash_of};
+use crate::model::{
+    Change, Entry, Event, Finding, Kind, QuarantineItem, Severity, Status, hash_of,
+};
+use crate::scanner::{FileScanner, MALWARE_RULE};
 use crate::store::{NewEvent, Store};
 use crate::targets::{self, CRONTAB_PATH, Target};
 
@@ -85,6 +89,17 @@ pub struct Guard {
     store: Store,
     targets: Vec<Target>,
     crontab: Box<dyn CrontabBackend>,
+    scanner: Option<Arc<dyn FileScanner>>,
+}
+
+fn severity_for(findings: &[Finding]) -> Severity {
+    if findings.iter().any(|f| f.rule == MALWARE_RULE) {
+        Severity::Malicious
+    } else if findings.is_empty() {
+        Severity::Notice
+    } else {
+        Severity::Suspicious
+    }
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
@@ -114,7 +129,13 @@ impl Guard {
             store,
             targets,
             crontab,
+            scanner: None,
         })
+    }
+
+    /// Check new persistence entries and the programs they start with this scanner.
+    pub fn set_scanner(&mut self, scanner: Arc<dyn FileScanner>) {
+        self.scanner = Some(scanner);
     }
 
     pub fn config(&self) -> &Config {
@@ -153,10 +174,12 @@ impl Guard {
     pub fn rescan(&mut self) -> Result<Vec<Event>> {
         let current = targets::snapshot(&self.targets, self.crontab.as_ref());
         let baseline = self.store.baseline()?;
+        self.prune_downloads()?;
         let open_paths: BTreeSet<String> = self
             .store
             .open_events()?
             .into_iter()
+            .filter(|e| e.kind != Kind::Download)
             .map(|e| e.path)
             .collect();
         let paths: BTreeSet<&String> = current
@@ -215,12 +238,16 @@ impl Guard {
                 }
 
                 let added = analyze::added_lines(base_entry, cur_entry);
-                let findings = analyze::findings(kind, cur_entry, &added);
-                let severity = if findings.is_empty() {
-                    Severity::Notice
-                } else {
-                    Severity::Suspicious
-                };
+                let mut findings = analyze::findings(kind, cur_entry, &added);
+                if let Some(scanner) = &self.scanner {
+                    if path != CRONTAB_PATH && matches!(cur_entry, Entry::File { .. }) {
+                        findings.extend(scanner.scan(Path::new(path)));
+                    }
+                    for program in analyze::referenced_programs(cur_entry, &self.config.home) {
+                        findings.extend(scanner.scan(&program));
+                    }
+                }
+                let severity = severity_for(&findings);
                 let new = NewEvent {
                     path,
                     kind,
@@ -257,6 +284,65 @@ impl Guard {
         Ok(events)
     }
 
+    /// Record a file in a download folder that a malware scanner flagged. Returns the event if
+    /// it is new; files the person allowed before and repeats are ignored.
+    pub fn record_detection(&mut self, path: &Path, findings: &[Finding]) -> Result<Option<Event>> {
+        if findings.is_empty() {
+            return Ok(None);
+        }
+        let Some(mut entry) = targets::read_entry(path)? else {
+            return Ok(None);
+        };
+        if let Entry::File { content, .. } = &mut entry {
+            // Malware itself is not kept in the database.
+            *content = None;
+        }
+        if self.store.is_allowed_hash(entry.hash())? {
+            return Ok(None);
+        }
+        let path_str = path.to_string_lossy().into_owned();
+        let open = self.store.open_event_for(&path_str)?;
+        if open
+            .as_ref()
+            .is_some_and(|ev| ev.new_hash() == entry.hash())
+        {
+            return Ok(None);
+        }
+        let new = NewEvent {
+            path: &path_str,
+            kind: Kind::Download,
+            change: Change::Created,
+            severity: severity_for(findings),
+            status: Status::Open,
+            old_hash: crate::model::ABSENT,
+            new_entry: Some(&entry),
+            findings,
+            added_lines: &[],
+        };
+        let id = match open {
+            Some(ev) => {
+                self.store.update_event(ev.id, &new)?;
+                ev.id
+            }
+            None => self.store.insert_event(&new)?,
+        };
+        Ok(self.store.event(id)?)
+    }
+
+    /// Close download events whose file was deleted or replaced in the meantime.
+    fn prune_downloads(&mut self) -> Result<()> {
+        for ev in self.store.open_events()? {
+            if ev.kind != Kind::Download {
+                continue;
+            }
+            let current = targets::read_entry(Path::new(&ev.path)).ok().flatten();
+            if hash_of(current.as_ref()) != ev.new_hash() {
+                self.store.resolve_event(ev.id, Status::Reverted, None)?;
+            }
+        }
+        Ok(())
+    }
+
     fn current_entry(&self, path: &str) -> Result<Option<Entry>> {
         if path == CRONTAB_PATH {
             return Ok(self
@@ -287,7 +373,11 @@ impl Guard {
     pub fn allow(&mut self, id: i64, seen_hash: Option<&str>) -> Result<Outcome> {
         let ev = self.check_decision(id, seen_hash)?;
         self.store.transaction(|s| {
-            s.set_baseline(&ev.path, ev.kind, ev.new_entry.as_ref())?;
+            if ev.kind == Kind::Download {
+                s.allow_hash(ev.new_hash(), &ev.path)?;
+            } else {
+                s.set_baseline(&ev.path, ev.kind, ev.new_entry.as_ref())?;
+            }
             s.resolve_event(ev.id, Status::Allowed, None)?;
             Ok(())
         })?;
@@ -298,7 +388,11 @@ impl Guard {
     pub fn remove(&mut self, id: i64, seen_hash: Option<&str>) -> Result<Outcome> {
         let ev = self.check_decision(id, seen_hash)?;
         let new_entry = ev.new_entry.clone().context("event has no new state")?;
-        let baseline = self.store.baseline_entry(&ev.path)?;
+        let baseline = if ev.kind == Kind::Download {
+            None
+        } else {
+            self.store.baseline_entry(&ev.path)?
+        };
         if let Some(Entry::File { content: None, .. }) = &baseline {
             bail!(DecisionError::CannotRestore(ev.path.clone()));
         }
@@ -418,7 +512,11 @@ impl Guard {
         }
         let stored = self.current_entry(&item.original_path)?;
         self.store.transaction(|s| {
-            s.set_baseline(&item.original_path, item.kind, stored.as_ref())?;
+            if item.kind == Kind::Download {
+                s.allow_hash(&item.hash, &item.original_path)?;
+            } else {
+                s.set_baseline(&item.original_path, item.kind, stored.as_ref())?;
+            }
             s.mark_restored(id)?;
             Ok(())
         })?;
