@@ -41,6 +41,8 @@ impl Env {
             data_dir: self.home.path().join(".local/share/wachposten"),
             crontab: true,
             systemctl: false,
+            system: false,
+            verify_packages: false,
         };
         Guard::with_crontab(config, Box::new(self.crontab.clone())).unwrap()
     }
@@ -268,4 +270,61 @@ fn ignores_unrelated_files() {
     fs::write(env.path(".config/autostart/notes.txt"), "x").unwrap();
     fs::write(env.path(".config/autostart/x.desktop~"), "x").unwrap();
     assert!(g.rescan().unwrap().is_empty());
+}
+
+#[test]
+fn old_database_is_migrated() {
+    let env = Env::new();
+    let data = env.path(".local/share/wachposten");
+    fs::create_dir_all(&data).unwrap();
+    // Schema of the first release: no uid columns.
+    let conn = rusqlite::Connection::open(data.join("state.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL, change TEXT NOT NULL,
+           severity TEXT NOT NULL, status TEXT NOT NULL, old_hash TEXT NOT NULL, new_type TEXT,
+           new_hash TEXT, new_mode INTEGER, new_size INTEGER, new_content BLOB, new_link_target TEXT,
+           findings TEXT NOT NULL, added_lines TEXT NOT NULL, resolved_at INTEGER, quarantine_id INTEGER);
+         INSERT INTO events (created_at, updated_at, path, kind, change, severity, status, old_hash,
+           findings, added_lines) VALUES (1, 1, '/x', 'shell-rc', 'modified', 'notice', 'open', 'a', '', '');
+         CREATE TABLE quarantine (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL,
+           original_path TEXT NOT NULL, kind TEXT NOT NULL, entry_type TEXT NOT NULL, mode INTEGER NOT NULL,
+           link_target TEXT, hash TEXT NOT NULL, event_id INTEGER, restored_at INTEGER);",
+    )
+    .unwrap();
+    drop(conn);
+    let g = env.guard();
+    let ev = g.store().event(1).unwrap().unwrap();
+    assert_eq!(ev.uid, None);
+    assert!(g.store().quarantine_items().unwrap().is_empty());
+}
+
+#[test]
+fn package_files_are_recognised() {
+    let has_pm = ["/usr/bin/rpm", "/usr/bin/dpkg"]
+        .iter()
+        .any(|p| Path::new(p).exists());
+    if !has_pm || !Path::new("/usr/bin/ls").exists() {
+        return;
+    }
+    assert!(wachposten_core::pkg::installed_unchanged(Path::new(
+        "/usr/bin/ls"
+    )));
+    let env = Env::new();
+    assert!(!wachposten_core::pkg::installed_unchanged(
+        &env.path(".bashrc")
+    ));
+}
+
+#[test]
+fn events_serialize_without_content() {
+    let env = Env::new();
+    let mut g = env.initialized();
+    fs::write(env.path(".bashrc"), "changed\n").unwrap();
+    let ev = g.rescan().unwrap().remove(0);
+    let json = serde_json::to_string(&wachposten_core::ipc::strip(ev)).unwrap();
+    assert!(json.contains("\"kind\":\"shell-rc\""));
+    assert!(json.contains("\"content\":null"));
+    let back: wachposten_core::Event = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.kind, Kind::ShellRc);
 }

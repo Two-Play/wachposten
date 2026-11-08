@@ -153,7 +153,7 @@ fn decode_findings(s: &str) -> Vec<Finding> {
 
 const EVENT_COLS: &str = "id, created_at, updated_at, path, kind, change, severity, status, old_hash, \
      new_type, new_hash, new_mode, new_size, new_content, new_link_target, findings, added_lines, \
-     resolved_at, quarantine_id";
+     resolved_at, quarantine_id, uid";
 
 fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
@@ -182,6 +182,7 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
             .collect(),
         resolved_at: row.get(17)?,
         quarantine_id: row.get(18)?,
+        uid: row.get(19)?,
     })
 }
 
@@ -196,6 +197,19 @@ pub struct NewEvent<'a> {
     pub new_entry: Option<&'a Entry>,
     pub findings: &'a [Finding],
     pub added_lines: &'a [String],
+    pub uid: Option<u32>,
+}
+
+fn add_column(conn: &Connection, table: &str, column: &str, decl: &str) -> rusqlite::Result<()> {
+    let exists = conn
+        .prepare(&format!(
+            "SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1"
+        ))?
+        .exists([column])?;
+    if !exists {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))?;
+    }
+    Ok(())
 }
 
 impl Store {
@@ -212,6 +226,10 @@ impl Store {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
+        // Columns added after the first release.
+        add_column(&conn, "events", "uid", "INTEGER")?;
+        add_column(&conn, "quarantine", "uid", "INTEGER")?;
+        add_column(&conn, "quarantine", "gid", "INTEGER")?;
         Ok(Store { conn })
     }
 
@@ -320,8 +338,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO events (created_at, updated_at, path, kind, change, severity, status, old_hash,
                new_type, new_hash, new_mode, new_size, new_content, new_link_target, findings, added_lines,
-               resolved_at)
-             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+               resolved_at, uid)
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 t,
                 e.path,
@@ -338,7 +356,8 @@ impl Store {
                 link,
                 encode_findings(e.findings),
                 e.added_lines.join("\n"),
-                resolved
+                resolved,
+                e.uid
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -421,6 +440,14 @@ impl Store {
         stmt.query_map(p, event_from_row)?.collect()
     }
 
+    /// Delete closed events of `kind` older than `max_age_secs`. Returns how many went.
+    pub fn prune_history(&self, kind: Kind, max_age_secs: i64) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM events WHERE kind = ?1 AND status != 'open' AND updated_at < ?2",
+            params![kind.as_str(), now() - max_age_secs],
+        )
+    }
+
     /// Remember a file hash the person allowed, so it is not reported again.
     pub fn allow_hash(&self, hash: &str, path: &str) -> rusqlite::Result<()> {
         self.conn.execute(
@@ -443,8 +470,9 @@ impl Store {
 
     pub fn insert_quarantine(&self, q: &QuarantineItem) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO quarantine (created_at, original_path, kind, entry_type, mode, link_target, hash, event_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO quarantine (created_at, original_path, kind, entry_type, mode, link_target, hash, event_id,
+               uid, gid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 now(),
                 q.original_path,
@@ -453,7 +481,9 @@ impl Store {
                 q.mode,
                 q.link_target,
                 q.hash,
-                q.event_id
+                q.event_id,
+                q.owner.map(|o| o.0),
+                q.owner.map(|o| o.1)
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -479,13 +509,17 @@ impl Store {
             hash: r.get(7)?,
             event_id: r.get(8)?,
             restored_at: r.get(9)?,
+            owner: match (r.get::<_, Option<u32>>(10)?, r.get::<_, Option<u32>>(11)?) {
+                (Some(u), Some(g)) => Some((u, g)),
+                _ => None,
+            },
         })
     }
 
     pub fn quarantine_item(&self, id: i64) -> rusqlite::Result<Option<QuarantineItem>> {
         self.conn
             .query_row(
-                "SELECT id, created_at, original_path, kind, entry_type, mode, link_target, hash, event_id, restored_at
+                "SELECT id, created_at, original_path, kind, entry_type, mode, link_target, hash, event_id, restored_at, uid, gid
                  FROM quarantine WHERE id = ?1",
                 [id],
                 Self::quarantine_from_row,
@@ -495,7 +529,7 @@ impl Store {
 
     pub fn quarantine_items(&self) -> rusqlite::Result<Vec<QuarantineItem>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, created_at, original_path, kind, entry_type, mode, link_target, hash, event_id, restored_at
+            "SELECT id, created_at, original_path, kind, entry_type, mode, link_target, hash, event_id, restored_at, uid, gid
              FROM quarantine ORDER BY id DESC",
         )?;
         stmt.query_map([], Self::quarantine_from_row)?.collect()

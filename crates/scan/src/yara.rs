@@ -109,8 +109,17 @@ impl YaraEngine {
     }
 
     pub fn scan_file(&self, path: &Path) -> anyhow::Result<Vec<YaraMatch>> {
+        self.scan_file_within(path, TIMEOUT)
+    }
+
+    /// Scan with a time limit; a scan that runs out of time is an error.
+    pub fn scan_file_within(
+        &self,
+        path: &Path,
+        timeout: Duration,
+    ) -> anyhow::Result<Vec<YaraMatch>> {
         let mut scanner = Scanner::new(&self.rules);
-        scanner.set_timeout(TIMEOUT);
+        scanner.set_timeout(timeout);
         let results = scanner.scan_file(path)?;
         Ok(results
             .matching_rules()

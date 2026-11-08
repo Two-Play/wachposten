@@ -1,0 +1,25 @@
+# /etc/wachposten/daemon.toml – all keys are optional; these are the defaults.
+
+# Members of these groups may decide on system-wide events. Everybody sees them.
+admin_groups = ["wheel", "sudo", "admin"]
+
+[exec]
+# Watch program starts from /tmp, /var/tmp, /dev/shm, /run/user and ~/.cache.
+enabled = true
+# Refuse to start known malware (YARA-X or hash hit) from tmpfs folders.
+block_known_malware = true
+# "suspicious": hits, hidden names, /dev/shm, names of system processes
+# "always": every program not allowed before; "malware": hits only
+popup = "suspicious"
+# Time a held-up start may spend in the scan before it is allowed anyway.
+scan_budget_ms = 1500
+history_days = 30
+
+[yara]
+enabled = true
+extra_rule_dirs = []
+
+[hashes]
+# malwarebazaar_auth_key = "..."   # from https://auth.abuse.ch/, non-commercial use only
+update_hours = 6
+online_lookup = false

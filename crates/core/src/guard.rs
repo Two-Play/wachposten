@@ -4,7 +4,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -26,8 +26,12 @@ pub struct Config {
     pub home: PathBuf,
     pub data_dir: PathBuf,
     pub crontab: bool,
-    /// Run `systemctl --user` after removing a unit. Off in tests.
+    /// Run `systemctl` after removing a unit. Off in tests.
     pub systemctl: bool,
+    /// Watch the system-wide locations (root daemon) instead of a home directory.
+    pub system: bool,
+    /// Accept files that a package installed unchanged without asking.
+    pub verify_packages: bool,
 }
 
 impl Config {
@@ -46,7 +50,21 @@ impl Config {
             data_dir: data_base.join("wachposten"),
             crontab,
             systemctl: true,
+            system: false,
+            verify_packages: false,
         })
+    }
+
+    /// Settings of the root daemon: system-wide locations, data in `data_dir`.
+    pub fn system(data_dir: PathBuf) -> Config {
+        Config {
+            home: PathBuf::from("/"),
+            data_dir,
+            crontab: false,
+            systemctl: true,
+            system: true,
+            verify_packages: true,
+        }
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -92,7 +110,19 @@ pub struct Guard {
     scanner: Option<Arc<dyn FileScanner>>,
 }
 
-fn severity_for(findings: &[Finding]) -> Severity {
+/// A single file to record, see [`Guard::record_file`].
+pub struct FileReport<'a> {
+    pub path: &'a Path,
+    pub kind: Kind,
+    pub severity: Severity,
+    pub ask: bool,
+    pub findings: &'a [Finding],
+    /// Extra lines shown with the event, such as the process that started a program.
+    pub details: &'a [String],
+    pub uid: Option<u32>,
+}
+
+pub fn severity_for(findings: &[Finding]) -> Severity {
     if findings.iter().any(|f| f.rule == MALWARE_RULE) {
         Severity::Malicious
     } else if findings.is_empty() {
@@ -123,7 +153,11 @@ impl Guard {
         create_private_dir(&config.quarantine_dir())?;
         let store = Store::open(&config.db_path())
             .with_context(|| format!("cannot open {}", config.db_path().display()))?;
-        let targets = targets::home_targets(&config.home, config.crontab);
+        let targets = if config.system {
+            targets::system_targets()
+        } else {
+            targets::home_targets(&config.home, config.crontab)
+        };
         Ok(Guard {
             config,
             store,
@@ -179,7 +213,7 @@ impl Guard {
             .store
             .open_events()?
             .into_iter()
-            .filter(|e| e.kind != Kind::Download)
+            .filter(|e| !e.kind.is_file_report())
             .map(|e| e.path)
             .collect();
         let paths: BTreeSet<&String> = current
@@ -225,6 +259,7 @@ impl Guard {
                         new_entry: None,
                         findings: &[],
                         added_lines: &[],
+                        uid: None,
                     })?;
                     s.set_baseline(path, kind, None)?;
                     continue;
@@ -234,6 +269,33 @@ impl Guard {
                     .as_ref()
                     .is_some_and(|ev| ev.new_hash() == cur_entry.hash())
                 {
+                    continue;
+                }
+
+                if self.config.verify_packages
+                    && matches!(cur_entry, Entry::File { .. })
+                    && crate::pkg::installed_unchanged(Path::new(path))
+                {
+                    if let Some(ev) = &open {
+                        s.resolve_event(ev.id, Status::Accepted, None)?;
+                    }
+                    s.insert_event(&NewEvent {
+                        path,
+                        kind,
+                        change: if base_entry.is_some() {
+                            Change::Modified
+                        } else {
+                            Change::Created
+                        },
+                        severity: Severity::Info,
+                        status: Status::Accepted,
+                        old_hash: hash_of(base_entry),
+                        new_entry: Some(cur_entry),
+                        findings: &[],
+                        added_lines: &["(package file, unchanged)".to_string()],
+                        uid: None,
+                    })?;
+                    s.set_baseline(path, kind, Some(cur_entry))?;
                     continue;
                 }
 
@@ -262,6 +324,7 @@ impl Guard {
                     new_entry: Some(cur_entry),
                     findings: &findings,
                     added_lines: &added,
+                    uid: None,
                 };
                 let id = match open {
                     Some(ev) => {
@@ -290,17 +353,32 @@ impl Guard {
         if findings.is_empty() {
             return Ok(None);
         }
-        let Some(mut entry) = targets::read_entry(path)? else {
+        self.record_file(&FileReport {
+            path,
+            kind: Kind::Download,
+            severity: severity_for(findings),
+            ask: true,
+            findings,
+            details: &[],
+            uid: None,
+        })
+    }
+
+    /// Record a single file (a download or a program start). With `ask` the event stays open
+    /// for a decision; without, it is only kept in the history. Returns the event if it is new.
+    /// Files whose hash the person allowed before and repeats of an open event are ignored.
+    pub fn record_file(&mut self, report: &FileReport<'_>) -> Result<Option<Event>> {
+        let Some(mut entry) = targets::read_entry(report.path)? else {
             return Ok(None);
         };
         if let Entry::File { content, .. } = &mut entry {
-            // Malware itself is not kept in the database.
+            // Programs and malware are not kept in the database.
             *content = None;
         }
         if self.store.is_allowed_hash(entry.hash())? {
             return Ok(None);
         }
-        let path_str = path.to_string_lossy().into_owned();
+        let path_str = report.path.to_string_lossy().into_owned();
         let open = self.store.open_event_for(&path_str)?;
         if open
             .as_ref()
@@ -310,26 +388,32 @@ impl Guard {
         }
         let new = NewEvent {
             path: &path_str,
-            kind: Kind::Download,
+            kind: report.kind,
             change: Change::Created,
-            severity: severity_for(findings),
-            status: Status::Open,
+            severity: report.severity,
+            status: if report.ask {
+                Status::Open
+            } else {
+                Status::Accepted
+            },
             old_hash: crate::model::ABSENT,
             new_entry: Some(&entry),
-            findings,
-            added_lines: &[],
+            findings: report.findings,
+            added_lines: report.details,
+            uid: report.uid,
         };
         let id = match open {
-            Some(ev) => {
+            Some(ev) if report.ask => {
                 self.store.update_event(ev.id, &new)?;
                 ev.id
             }
-            None => self.store.insert_event(&new)?,
+            _ => self.store.insert_event(&new)?,
         };
         Ok(self.store.event(id)?)
     }
 
-    /// Close download events whose file was deleted or replaced in the meantime.
+    /// Close download events whose file was deleted or replaced in the meantime. Program starts
+    /// stay open: malware often deletes itself after starting, and its process may still run.
     fn prune_downloads(&mut self) -> Result<()> {
         for ev in self.store.open_events()? {
             if ev.kind != Kind::Download {
@@ -363,7 +447,8 @@ impl Guard {
             bail!(DecisionError::Stale);
         }
         let current = self.current_entry(&ev.path)?;
-        if hash_of(current.as_ref()) != ev.new_hash() {
+        let gone_program = ev.kind == Kind::TempExec && current.is_none();
+        if hash_of(current.as_ref()) != ev.new_hash() && !gone_program {
             bail!(DecisionError::Stale);
         }
         Ok(ev)
@@ -373,7 +458,7 @@ impl Guard {
     pub fn allow(&mut self, id: i64, seen_hash: Option<&str>) -> Result<Outcome> {
         let ev = self.check_decision(id, seen_hash)?;
         self.store.transaction(|s| {
-            if ev.kind == Kind::Download {
+            if ev.kind.is_file_report() {
                 s.allow_hash(ev.new_hash(), &ev.path)?;
             } else {
                 s.set_baseline(&ev.path, ev.kind, ev.new_entry.as_ref())?;
@@ -388,7 +473,7 @@ impl Guard {
     pub fn remove(&mut self, id: i64, seen_hash: Option<&str>) -> Result<Outcome> {
         let ev = self.check_decision(id, seen_hash)?;
         let new_entry = ev.new_entry.clone().context("event has no new state")?;
-        let baseline = if ev.kind == Kind::Download {
+        let baseline = if ev.kind.is_file_report() {
             None
         } else {
             self.store.baseline_entry(&ev.path)?
@@ -397,6 +482,13 @@ impl Guard {
             bail!(DecisionError::CannotRestore(ev.path.clone()));
         }
 
+        if ev.kind == Kind::TempExec && fs::symlink_metadata(&ev.path).is_err() {
+            // The program deleted itself; the caller ended its processes.
+            self.store.resolve_event(ev.id, Status::Removed, None)?;
+            return Ok(Outcome::Removed {
+                quarantine_id: None,
+            });
+        }
         let qid = self.quarantine(&ev, &new_entry)?;
         if ev.path == CRONTAB_PATH {
             let old = baseline.as_ref().and_then(|b| match b {
@@ -410,8 +502,13 @@ impl Guard {
                 None => remove_path(path)?,
                 Some(entry) => write_entry(path, entry)?,
             }
-            if ev.kind == Kind::SystemdUser && self.config.systemctl {
-                systemd_cleanup(path, baseline.is_none());
+            if self.config.systemctl
+                && matches!(ev.kind, Kind::SystemdUser | Kind::SystemdSystem)
+                && path
+                    .extension()
+                    .is_some_and(|e| e != "rules" && e != "local")
+            {
+                systemd_cleanup(path, baseline.is_none(), !self.config.system);
             }
         }
         self.store.transaction(|s| {
@@ -428,6 +525,9 @@ impl Guard {
             Entry::File { mode, .. } => ("file", *mode, None),
             Entry::Symlink { target, .. } => ("symlink", 0o777, Some(target.clone())),
         };
+        let owner = fs::symlink_metadata(&ev.path)
+            .ok()
+            .map(|m| (m.uid(), m.gid()));
         let qid = self.store.insert_quarantine(&QuarantineItem {
             id: 0,
             created_at: 0,
@@ -439,6 +539,7 @@ impl Guard {
             hash: entry.hash().to_string(),
             event_id: Some(ev.id),
             restored_at: None,
+            owner,
         })?;
         if let Entry::File { .. } = entry {
             let data = self.quarantine_data(qid);
@@ -505,14 +606,14 @@ impl Guard {
             match &entry {
                 Entry::File { .. } => {
                     let data = fs::read(self.quarantine_data(id))?;
-                    write_file(path, &data, item.mode)?;
+                    write_file(path, &data, item.mode, item.owner)?;
                 }
                 Entry::Symlink { .. } => write_entry(path, &entry)?,
             }
         }
         let stored = self.current_entry(&item.original_path)?;
         self.store.transaction(|s| {
-            if item.kind == Kind::Download {
+            if item.kind.is_file_report() {
                 s.allow_hash(&item.hash, &item.original_path)?;
             } else {
                 s.set_baseline(&item.original_path, item.kind, stored.as_ref())?;
@@ -532,7 +633,9 @@ fn remove_path(path: &Path) -> io::Result<()> {
 }
 
 /// Write a file through a temporary name in the same directory and rename it into place.
-fn write_file(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
+/// The file keeps its current owner; a new file gets `owner` if given. Changing the owner needs
+/// root and is skipped when it already matches.
+fn write_file(path: &Path, data: &[u8], mode: u32, owner: Option<(u32, u32)>) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| io::Error::other("no parent"))?;
     fs::create_dir_all(dir)?;
     let name = path
@@ -541,6 +644,16 @@ fn write_file(path: &Path, data: &[u8], mode: u32) -> io::Result<()> {
     let tmp = dir.join(format!(".{}.wachposten-tmp", name.to_string_lossy()));
     fs::write(&tmp, data)?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+    let want = fs::metadata(path)
+        .ok()
+        .map(|m| (m.uid(), m.gid()))
+        .or(owner);
+    if let Some((uid, gid)) = want {
+        let have = fs::metadata(&tmp)?;
+        if (have.uid(), have.gid()) != (uid, gid) {
+            chown(&tmp, Some(uid), Some(gid))?;
+        }
+    }
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         fs::remove_file(path)?;
     }
@@ -553,7 +666,7 @@ fn write_entry(path: &Path, entry: &Entry) -> io::Result<()> {
             content: Some(c),
             mode,
             ..
-        } => write_file(path, c, *mode),
+        } => write_file(path, c, *mode, None),
         Entry::File { content: None, .. } => Err(io::Error::other("content not stored")),
         Entry::Symlink { target, .. } => {
             remove_path(path)?;
@@ -566,10 +679,14 @@ fn write_entry(path: &Path, entry: &Entry) -> io::Result<()> {
 }
 
 /// Reload systemd after a unit was removed, and stop it if the unit itself is gone.
-fn systemd_cleanup(path: &Path, removed: bool) {
+fn systemd_cleanup(path: &Path, removed: bool, user: bool) {
     let run = |args: &[&str]| {
-        if let Err(e) = Command::new("systemctl").arg("--user").args(args).status() {
-            log::warn!("systemctl --user {args:?}: {e}");
+        let mut cmd = Command::new("systemctl");
+        if user {
+            cmd.arg("--user");
+        }
+        if let Err(e) = cmd.args(args).status() {
+            log::warn!("systemctl {args:?}: {e}");
         }
     };
     let in_wants = path.parent().and_then(Path::file_name).is_some_and(|d| {

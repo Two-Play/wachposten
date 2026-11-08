@@ -48,6 +48,16 @@ pub fn kind_label(kind: Kind) -> &'static str {
         Kind::Ssh => tr("SSH-Zugang", "SSH access"),
         Kind::Crontab => tr("Zeitgesteuerte Aufgabe (cron)", "scheduled task (cron)"),
         Kind::Download => tr("Download", "download"),
+        Kind::SystemdSystem => tr("Systemdienst / Systemstart", "system service / boot"),
+        Kind::Preload => tr("Bibliotheken laden", "library loading"),
+        Kind::Privileges => tr(
+            "Rechte (sudo, polkit, PAM)",
+            "privileges (sudo, polkit, PAM)",
+        ),
+        Kind::TempExec => tr(
+            "Programmstart aus temporärem Ordner",
+            "program start from a temporary folder",
+        ),
     }
 }
 
@@ -92,6 +102,14 @@ pub fn rule_label(rule: &str) -> &'static str {
         ),
         "binary" => tr("ist eine Programmdatei, kein Text", "is a binary, not text"),
         "malware" => tr("bekannte Schadsoftware", "known malware"),
+        "shm" => tr(
+            "läuft aus dem Arbeitsspeicher-Ordner /dev/shm",
+            "runs from the memory folder /dev/shm",
+        ),
+        "masquerade" => tr(
+            "tarnt sich mit dem Namen eines Systemprozesses",
+            "poses as a system process by name",
+        ),
         _ => tr("auffälliger Inhalt", "suspicious content"),
     }
 }
@@ -100,6 +118,27 @@ pub fn rule_label(rule: &str) -> &'static str {
 pub fn event_title(ev: &Event) -> String {
     let name = display_name(&ev.path);
     match (ev.kind, ev.change) {
+        (Kind::TempExec, _) if ev.severity == crate::model::Severity::Malicious => {
+            format!(
+                "{}: {name}",
+                tr("Schadsoftware gestartet", "Malware started")
+            )
+        }
+        (Kind::TempExec, _) => format!(
+            "{}: {name}",
+            tr(
+                "Programm aus temporärem Ordner",
+                "Program from a temporary folder"
+            )
+        ),
+        (Kind::SystemdSystem, Change::Created) => {
+            format!("{}: {name}", tr("Neuer Systemdienst", "New system service"))
+        }
+        (Kind::Preload, _) => format!(
+            "{}: {name}",
+            tr("Bibliotheken-Laden geändert", "Library loading changed")
+        ),
+        (Kind::Privileges, _) => format!("{}: {name}", tr("Rechte geändert", "Privileges changed")),
         (Kind::Download, _) => format!(
             "{}: {name}",
             tr("Schadsoftware erkannt", "Malware detected")
@@ -156,6 +195,22 @@ pub fn event_sentence(ev: &Event) -> &'static str {
         (Kind::Download, _) => tr(
             "Eine heruntergeladene Datei ist als Schadsoftware bekannt. Öffne sie nicht.",
             "A downloaded file is known malware. Do not open it.",
+        ),
+        (Kind::SystemdSystem, _) => tr(
+            "Etwas soll beim Systemstart oder als Systemdienst mit Root-Rechten laufen.",
+            "Something is set to run at boot or as a system service with root rights.",
+        ),
+        (Kind::Preload, _) => tr(
+            "Das Laden von Bibliotheken wurde geändert. Das betrifft jedes Programm.",
+            "How libraries are loaded was changed. This affects every program.",
+        ),
+        (Kind::Privileges, _) => tr(
+            "Rechte für sudo, polkit oder die Anmeldung (PAM) wurden geändert.",
+            "Rights for sudo, polkit or login (PAM) were changed.",
+        ),
+        (Kind::TempExec, _) => tr(
+            "Ein Programm wurde aus einem temporären Ordner gestartet. Schadsoftware nutzt solche Orte gern.",
+            "A program was started from a temporary folder. Malware likes to use such places.",
         ),
     }
 }

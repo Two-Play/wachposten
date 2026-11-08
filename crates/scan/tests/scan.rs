@@ -121,6 +121,8 @@ fn guard_with_scanner(home: &Path) -> (Guard, Arc<MalwareScanner>) {
         data_dir: home.join(".local/share/wachposten"),
         crontab: false,
         systemctl: false,
+        system: false,
+        verify_packages: false,
     };
     let mut guard = Guard::with_crontab(config.clone(), Box::new(NoCrontab)).unwrap();
     let db = HashDb::open(&config.data_dir.join("hashes.db")).unwrap();

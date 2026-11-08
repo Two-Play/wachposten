@@ -1,0 +1,22 @@
+[package]
+name = "wachposten-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wachposten-core.workspace = true
+wachposten-watch.workspace = true
+wachposten-scan.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+nix.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

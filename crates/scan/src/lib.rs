@@ -111,6 +111,17 @@ impl MalwareScanner {
 
     /// Check one regular file. Errors are logged; an unreadable file gives no detections.
     pub fn scan_path(&self, path: &Path) -> Vec<Detection> {
+        self.scan_path_with(path, None)
+    }
+
+    /// Like [`scan_path`](Self::scan_path) for callers that hold up a program start: no network
+    /// lookup, and YARA stops after `budget`. Larger files than the scan limit only get the hash
+    /// check.
+    pub fn scan_path_quick(&self, path: &Path, budget: Duration) -> Vec<Detection> {
+        self.scan_path_with(path, Some(budget))
+    }
+
+    fn scan_path_with(&self, path: &Path, budget: Option<Duration>) -> Vec<Detection> {
         let Ok(meta) = std::fs::metadata(path) else {
             return Vec::new();
         };
@@ -134,7 +145,8 @@ impl MalwareScanner {
                     description: None,
                 }),
                 Ok(None) => {
-                    if let Some(key) = &self.online_key
+                    if budget.is_none()
+                        && let Some(key) = &self.online_key
                         && let Some(name) = self.online(db, key, sha)
                     {
                         out.push(Detection {
@@ -151,7 +163,11 @@ impl MalwareScanner {
         if let Some(yara) = &self.yara
             && meta.len() <= self.max_scan_bytes
         {
-            match yara.scan_file(path) {
+            let result = match budget {
+                Some(b) => yara.scan_file_within(path, b),
+                None => yara.scan_file(path),
+            };
+            match result {
                 Ok(matches) => out.extend(matches.into_iter().map(|m| Detection {
                     source: "yara",
                     name: m.rule,
@@ -190,14 +206,49 @@ impl MalwareScanner {
     }
 }
 
+/// Turn detections into core findings.
+pub fn findings(path: &Path, detections: Vec<Detection>) -> Vec<Finding> {
+    detections
+        .into_iter()
+        .map(|d| Finding {
+            rule: MALWARE_RULE.to_string(),
+            line: format!("{} – {}", d.label(), path.display()),
+        })
+        .collect()
+}
+
+/// Fetch the recent MalwareBazaar hashes now and then. The list covers 48 hours, so an
+/// interval below that loses nothing.
+pub fn spawn_hash_updates(scanner: std::sync::Arc<MalwareScanner>, key: String, hours: u64) {
+    let interval = Duration::from_secs(hours.clamp(1, 24) * 3600);
+    std::thread::spawn(move || {
+        let Some(db) = scanner.hashes.as_ref() else {
+            return;
+        };
+        loop {
+            let last: i64 = db
+                .meta("updated_at")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let due = last + interval.as_secs() as i64;
+            let now = now();
+            if now >= due {
+                match bazaar::update_recent(db, &key) {
+                    Ok((got, new)) => log::info!("MalwareBazaar: {got} hashes, {new} new"),
+                    Err(e) => log::warn!("{e:#}"),
+                }
+                std::thread::sleep(interval);
+            } else {
+                std::thread::sleep(Duration::from_secs((due - now) as u64));
+            }
+        }
+    });
+}
+
 impl FileScanner for MalwareScanner {
     fn scan(&self, path: &Path) -> Vec<Finding> {
-        self.scan_path(path)
-            .into_iter()
-            .map(|d| Finding {
-                rule: MALWARE_RULE.to_string(),
-                line: format!("{} – {}", d.label(), path.display()),
-            })
-            .collect()
+        findings(path, self.scan_path(path))
     }
 }

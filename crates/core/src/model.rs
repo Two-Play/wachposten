@@ -3,8 +3,11 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 /// What kind of persistence location an entry belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Kind {
     /// XDG autostart entries and KDE autostart scripts.
     Autostart,
@@ -22,10 +25,18 @@ pub enum Kind {
     Crontab,
     /// A file in a download folder that matched a malware signature or hash.
     Download,
+    /// System-wide systemd units in `/etc/systemd`.
+    SystemdSystem,
+    /// `/etc/ld.so.preload` and the dynamic linker configuration.
+    Preload,
+    /// sudo, polkit and PAM configuration.
+    Privileges,
+    /// A program started from a temporary folder.
+    TempExec,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 12] = [
         Kind::Autostart,
         Kind::SystemdUser,
         Kind::ShellRc,
@@ -34,6 +45,10 @@ impl Kind {
         Kind::Ssh,
         Kind::Crontab,
         Kind::Download,
+        Kind::SystemdSystem,
+        Kind::Preload,
+        Kind::Privileges,
+        Kind::TempExec,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -46,7 +61,16 @@ impl Kind {
             Kind::Ssh => "ssh",
             Kind::Crontab => "crontab",
             Kind::Download => "download",
+            Kind::SystemdSystem => "systemd-system",
+            Kind::Preload => "preload",
+            Kind::Privileges => "privileges",
+            Kind::TempExec => "temp-exec",
         }
+    }
+
+    /// Kinds that describe a single file decided on by its hash, not a baseline entry.
+    pub fn is_file_report(self) -> bool {
+        matches!(self, Kind::Download | Kind::TempExec)
     }
 }
 
@@ -67,7 +91,8 @@ impl FromStr for Kind {
 }
 
 /// The observed state of one watched path. A missing path has no `Entry`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Entry {
     File {
         hash: String,
@@ -114,7 +139,8 @@ pub fn hash_of(entry: Option<&Entry>) -> &str {
     entry.map_or(ABSENT, Entry::hash)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Change {
     Created,
     Modified,
@@ -143,7 +169,8 @@ impl FromStr for Change {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Severity {
     /// Recorded only, no question asked (for example a deleted entry).
     Info,
@@ -179,7 +206,8 @@ impl FromStr for Severity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Status {
     /// Waiting for a decision.
     Open,
@@ -220,7 +248,7 @@ impl FromStr for Status {
 }
 
 /// One rule that matched in new or changed content.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     /// Stable rule identifier, see [`crate::analyze`].
     pub rule: String,
@@ -228,7 +256,7 @@ pub struct Finding {
     pub line: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: i64,
     pub created_at: i64,
@@ -246,6 +274,10 @@ pub struct Event {
     pub added_lines: Vec<String>,
     pub resolved_at: Option<i64>,
     pub quarantine_id: Option<i64>,
+    /// The user the event belongs to (for program starts: who started it). `None` for
+    /// system-wide entries and events of the agent itself.
+    #[serde(default)]
+    pub uid: Option<u32>,
 }
 
 impl Event {
@@ -254,7 +286,7 @@ impl Event {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuarantineItem {
     pub id: i64,
     pub created_at: i64,
@@ -266,4 +298,7 @@ pub struct QuarantineItem {
     pub hash: String,
     pub event_id: Option<i64>,
     pub restored_at: Option<i64>,
+    /// Owner of the quarantined file, restored with it.
+    #[serde(default)]
+    pub owner: Option<(u32, u32)>,
 }

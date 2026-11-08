@@ -18,7 +18,7 @@ hex.workspace = true
 yara-x.workspace = true
 ureq.workspace = true
 zip.workspace = true
-serde_json = "1"
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

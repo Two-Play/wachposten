@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/watch", "crates/scan", "crates/agent", "crates/app"]
+members = ["crates/core", "crates/watch", "crates/scan", "crates/daemon", "crates/agent", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,11 +28,12 @@ env_logger = "0.11"
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+serde_json = "1"
 # yara-x 1.23 needs rsa 0.10.0-rc.19; newer release candidates break its build (pinned in Cargo.lock).
 yara-x = "1.23"
 ureq = "3"
 zip = { version = "9", default-features = false, features = ["deflate"] }
-nix = { version = "0.31", features = ["poll"] }
+nix = { version = "0.31", features = ["poll", "fanotify", "user", "socket", "signal", "fs", "process"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

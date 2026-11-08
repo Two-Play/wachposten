@@ -4,7 +4,10 @@
 mod notify;
 mod tray;
 
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, TryLockError};
+use std::io::BufReader;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
@@ -14,8 +17,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use ksni::blocking::TrayMethods;
 use wachposten_core::i18n::tr;
+use wachposten_core::ipc::{self, Reply, Request};
 use wachposten_core::{
-    Config, DecisionError, Event, FileScanner, Finding, Guard, Kind, Outcome, Settings,
+    Config, DecisionError, Event, FileScanner, Finding, Guard, Kind, Outcome, Settings, Status,
 };
 use wachposten_scan::MalwareScanner;
 
@@ -45,6 +49,22 @@ pub enum Msg {
         id: i64,
         hash: String,
         decision: Decision,
+        /// The event belongs to the root daemon.
+        system: bool,
+    },
+    /// An event from the root daemon, new or changed.
+    Remote {
+        event: Box<Event>,
+        can_decide: bool,
+    },
+    DaemonConnected {
+        admin: bool,
+    },
+    DaemonLost,
+    /// Answer of the daemon to a decision.
+    RemoteResult {
+        decision: Decision,
+        reply: Box<Reply>,
     },
     Quit,
 }
@@ -54,19 +74,32 @@ struct Agent {
     tx: Sender<Msg>,
     tray: Option<ksni::blocking::Handle<tray::Tray>>,
     watch: wachposten_watch::WatchHandle,
+    /// Open events of the root daemon and whether this person may decide on them.
+    remote: BTreeMap<i64, (Event, bool)>,
+    /// Daemon events already shown, by id and state, so a reconnect does not repeat them.
+    remote_seen: HashSet<(i64, String)>,
 }
 
 impl Agent {
     fn ask(&self, events: &[Event]) {
         for ev in events {
-            notify::ask(&self.guard.config().home, ev, self.tx.clone());
+            notify::ask(&self.guard.config().home, ev, self.tx.clone(), false, true);
         }
     }
 
     fn refresh(&self) -> Result<()> {
         let open = self.guard.store().open_events()?;
+        let mut items: Vec<tray::OpenItem> = self
+            .remote
+            .values()
+            .map(|(ev, can)| tray::OpenItem::from_event(ev, true, *can))
+            .collect();
+        items.extend(
+            open.iter()
+                .map(|ev| tray::OpenItem::from_event(ev, false, true)),
+        );
         if let Some(tray) = &self.tray {
-            tray.update(|t| t.open = open.iter().map(tray::OpenItem::from_event).collect());
+            tray.update(|t| t.open = items);
         }
         self.watch.set_specs(self.guard.watch_specs());
         Ok(())
@@ -95,7 +128,67 @@ impl Agent {
         self.refresh()
     }
 
+    fn remote_event(&mut self, ev: Event, can_decide: bool) -> Result<()> {
+        if ev.status != Status::Open {
+            self.remote.remove(&ev.id);
+            return self.refresh();
+        }
+        let key = (ev.id, ev.new_hash().to_string());
+        if self.remote_seen.insert(key) {
+            notify::ask(
+                &self.guard.config().home,
+                &ev,
+                self.tx.clone(),
+                true,
+                can_decide,
+            );
+        }
+        self.remote.insert(ev.id, (ev, can_decide));
+        self.refresh()
+    }
+
+    /// Send a decision to the daemon without blocking the main loop.
+    fn decide_remote(&self, id: i64, hash: String, decision: Decision) {
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let request = Request::Decide {
+                id,
+                hash: Some(hash),
+                decision: match decision {
+                    Decision::Allow => ipc::Decision::Allow,
+                    Decision::Remove => ipc::Decision::Remove,
+                },
+            };
+            let reply = ipc::call(&socket_path(), &request).unwrap_or_else(|e| Reply::Error {
+                message: format!("{e}"),
+            });
+            let _ = tx.send(Msg::RemoteResult {
+                decision,
+                reply: Box::new(reply),
+            });
+        });
+    }
+
+    fn remote_result(&self, decision: Decision, reply: &Reply) {
+        match reply {
+            Reply::Done { message } => {
+                log::info!("daemon: {message}");
+                if let Decision::Remove = decision {
+                    notify::info(tr("Entfernt", "Removed"), message, "security-high");
+                }
+            }
+            Reply::Error { message } if message.contains("already handled") => {}
+            Reply::Error { message } => {
+                notify::info(tr("Fehler", "Error"), message, "dialog-error");
+            }
+            _ => {}
+        }
+    }
+
     fn show_open(&self) -> Result<()> {
+        for (ev, can) in self.remote.values() {
+            notify::ask(&self.guard.config().home, ev, self.tx.clone(), true, *can);
+        }
         let open = self.guard.store().open_events()?;
         if open.len() > MAX_STARTUP_QUESTIONS {
             notify::info(
@@ -220,7 +313,7 @@ fn main() -> Result<()> {
         spawn_download_scanner(&settings, &config, scanner.clone(), tx.clone())?;
     }
     if let Some(key) = settings.hashes.malwarebazaar_auth_key.clone() {
-        spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
+        wachposten_scan::spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
     }
 
     let tick_tx = tx.clone();
@@ -246,11 +339,15 @@ fn main() -> Result<()> {
         }
     };
 
+    spawn_daemon_client(tx.clone());
+
     let mut agent = Agent {
         guard,
         tx,
         tray,
         watch,
+        remote: BTreeMap::new(),
+        remote_seen: HashSet::new(),
     };
     // Changes made while the agent was not running.
     let offline = agent.guard.rescan()?;
@@ -266,7 +363,34 @@ fn main() -> Result<()> {
             Msg::Changed | Msg::Tick | Msg::Rescan => agent.rescan(),
             Msg::ShowOpen => agent.show_open(),
             Msg::Detection { path, findings } => agent.detection(&path, &findings),
-            Msg::Decide { id, hash, decision } => agent.decide(id, &hash, decision),
+            Msg::Decide {
+                id,
+                hash,
+                decision,
+                system: true,
+            } => {
+                agent.decide_remote(id, hash, decision);
+                Ok(())
+            }
+            Msg::Decide {
+                id, hash, decision, ..
+            } => agent.decide(id, &hash, decision),
+            Msg::Remote { event, can_decide } => agent.remote_event(*event, can_decide),
+            Msg::DaemonConnected { admin } => {
+                log::info!(
+                    "connected to the daemon{}",
+                    if admin { " as admin" } else { "" }
+                );
+                Ok(())
+            }
+            Msg::DaemonLost => {
+                agent.remote.clear();
+                agent.refresh()
+            }
+            Msg::RemoteResult { decision, reply } => {
+                agent.remote_result(decision, &reply);
+                Ok(())
+            }
             Msg::Quit => break,
         };
         if let Err(e) = result {
@@ -302,32 +426,49 @@ fn spawn_download_scanner(
     Ok(())
 }
 
-/// Fetch the recent MalwareBazaar hashes now and then. The list covers 48 hours, so an
-/// interval below that loses nothing.
-fn spawn_hash_updates(scanner: Arc<MalwareScanner>, key: String, hours: u64) {
-    let interval = Duration::from_secs(hours.clamp(1, 24) * 3600);
+fn socket_path() -> PathBuf {
+    std::env::var_os("WACHPOSTEN_SOCKET").map_or_else(|| PathBuf::from(ipc::SOCKET), PathBuf::from)
+}
+
+/// Stay subscribed to the root daemon, reconnecting when it restarts. Without a daemon the
+/// agent works on its own.
+fn spawn_daemon_client(tx: Sender<Msg>) {
     thread::spawn(move || {
-        let Some(db) = scanner.hashes.as_ref() else {
-            return;
-        };
+        let mut announced_missing = false;
         loop {
-            let last: i64 = db
-                .meta("updated_at")
-                .ok()
-                .flatten()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            let now = wachposten_core::store::now();
-            let due = last + interval.as_secs() as i64;
-            if now >= due {
-                match wachposten_scan::bazaar::update_recent(db, &key) {
-                    Ok((got, new)) => log::info!("MalwareBazaar: {got} hashes, {new} new"),
-                    Err(e) => log::warn!("{e:#}"),
+            match follow_daemon(&tx) {
+                Ok(()) => log::info!("daemon connection closed"),
+                Err(e) if !announced_missing => {
+                    log::info!("no daemon ({e}); system-wide watching is off");
+                    announced_missing = true;
                 }
-                thread::sleep(interval);
-            } else {
-                thread::sleep(Duration::from_secs((due - now) as u64));
+                Err(_) => {}
             }
+            if tx.send(Msg::DaemonLost).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_secs(15));
         }
     });
+}
+
+fn follow_daemon(tx: &Sender<Msg>) -> std::io::Result<()> {
+    let stream = UnixStream::connect(socket_path())?;
+    let mut writer = stream.try_clone()?;
+    ipc::write_line(&mut writer, &Request::Subscribe)?;
+    let mut reader = BufReader::new(stream);
+    while let Some(reply) = ipc::read_line::<Reply>(&mut reader)? {
+        let msg = match reply {
+            Reply::Hello { admin, .. } => Msg::DaemonConnected { admin },
+            Reply::Event { event, can_decide } => Msg::Remote {
+                event: Box::new(event),
+                can_decide,
+            },
+            _ => continue,
+        };
+        if tx.send(msg).is_err() {
+            break;
+        }
+    }
+    Ok(())
 }

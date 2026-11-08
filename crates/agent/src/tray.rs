@@ -14,11 +14,19 @@ pub struct OpenItem {
     pub title: String,
     pub hash: String,
     pub suspicious: bool,
+    /// An event of the root daemon.
+    pub system: bool,
+    pub can_decide: bool,
 }
 
 impl OpenItem {
-    pub fn from_event(ev: &Event) -> OpenItem {
+    pub fn from_event(ev: &Event, system: bool, can_decide: bool) -> OpenItem {
         let title = i18n::event_title(ev);
+        let title = if system {
+            format!("{}: {title}", tr("System", "System"))
+        } else {
+            title
+        };
         let name = i18n::display_name(&ev.path);
         OpenItem {
             id: ev.id,
@@ -29,6 +37,8 @@ impl OpenItem {
             },
             hash: ev.new_hash().to_string(),
             suspicious: ev.severity >= Severity::Suspicious,
+            system,
+            can_decide,
         }
     }
 }
@@ -99,13 +109,29 @@ impl ksni::Tray for Tray {
             .into(),
         ];
         for item in &self.open {
+            if !item.can_decide {
+                items.push(
+                    StandardItem {
+                        label: format!(
+                            "{} ({})",
+                            item.title,
+                            tr("Admin entscheidet", "admin decides")
+                        ),
+                        enabled: false,
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+                continue;
+            }
             let decide = |decision: Decision| {
-                let (id, hash) = (item.id, item.hash.clone());
+                let (id, hash, system) = (item.id, item.hash.clone(), item.system);
                 Box::new(move |t: &mut Tray| {
                     let _ = t.tx.send(Msg::Decide {
                         id,
                         hash: hash.clone(),
                         decision,
+                        system,
                     });
                 }) as Box<dyn Fn(&mut Tray) + Send>
             };

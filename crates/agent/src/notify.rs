@@ -35,7 +35,8 @@ fn shorten(s: &str) -> String {
 pub fn pretty_path(home: &Path, path: &str) -> String {
     match Path::new(path).strip_prefix(home) {
         Ok(rel) => format!("~/{}", rel.display()),
-        Err(_) => i18n::display_name(path),
+        Err(_) if path == wachposten_core::CRONTAB_PATH => i18n::display_name(path),
+        Err(_) => path.to_string(),
     }
 }
 
@@ -56,7 +57,12 @@ pub fn body(home: &Path, ev: &Event) -> String {
             out.push(format!("⚠ {}", escape(i18n::rule_label(&finding.rule))));
         }
     }
-    if !ev.added_lines.is_empty() {
+    if ev.kind.is_file_report() {
+        // Details about the process, not file lines.
+        for line in ev.added_lines.iter().take(4) {
+            out.push(escape(&shorten(line)));
+        }
+    } else if !ev.added_lines.is_empty() {
         out.push(String::new());
         // Lines with findings first, then command lines, then the rest in file order.
         let rank = |line: &String| {
@@ -86,16 +92,34 @@ pub fn body(home: &Path, ev: &Event) -> String {
 }
 
 /// Show a question for an open event. The decision is sent back over `tx`, together with the
-/// hash of the state the person saw.
-pub fn ask(home: &Path, ev: &Event, tx: Sender<Msg>) {
+/// hash of the state the person saw. `system` marks events of the root daemon; without
+/// `can_decide` the message only informs.
+pub fn ask(home: &Path, ev: &Event, tx: Sender<Msg>, system: bool, can_decide: bool) {
     let mut n = Notification::new();
+    let mut text = body(home, ev);
+    if !can_decide {
+        text.push_str(&format!(
+            "\n\n{}",
+            tr(
+                "Darüber entscheidet ein Admin.",
+                "An admin decides about this.",
+            )
+        ));
+    }
+    let summary = if system {
+        format!("{}: {}", tr("System", "System"), i18n::event_title(ev))
+    } else {
+        i18n::event_title(ev)
+    };
     n.appname(APP)
-        .summary(&i18n::event_title(ev))
-        .body(&body(home, ev))
-        .action("remove", i18n::action_remove())
-        .action("allow", i18n::action_allow())
-        .action("later", i18n::action_later())
+        .summary(&summary)
+        .body(&text)
         .timeout(Timeout::Never);
+    if can_decide {
+        n.action("remove", i18n::action_remove())
+            .action("allow", i18n::action_allow())
+            .action("later", i18n::action_later());
+    }
     if ev.severity >= Severity::Suspicious {
         n.icon("security-low").urgency(Urgency::Critical);
     } else {
@@ -117,7 +141,12 @@ pub fn ask(home: &Path, ev: &Event, tx: Sender<Msg>) {
                 "remove" => Decision::Remove,
                 _ => return,
             };
-            let _ = tx.send(Msg::Decide { id, hash, decision });
+            let _ = tx.send(Msg::Decide {
+                id,
+                hash,
+                decision,
+                system,
+            });
         });
     });
 }

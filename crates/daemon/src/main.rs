@@ -1,0 +1,506 @@
+//! `wachposten-daemon`: runs as root. Watches system-wide persistence locations and program
+//! starts from temporary folders, and tells the agents of logged-in people about them.
+
+mod exec;
+mod proc;
+mod server;
+mod users;
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::thread;
+use std::time::Duration;
+
+use anyhow::Result;
+use clap::Parser;
+use wachposten_core::i18n::tr;
+use wachposten_core::ipc::{self, Decision, Reply, Request};
+use wachposten_core::settings::{DAEMON_SETTINGS, DaemonSettings, ExecPopup};
+use wachposten_core::{Config, Event, FileReport, Finding, Guard, Kind, Outcome, Severity, Status};
+use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, hash_db_path};
+
+use crate::exec::{ExecReport, ExecStatus};
+use crate::server::Client;
+
+const TICK: Duration = Duration::from_secs(60);
+/// While a package transaction runs, checks are retried this often.
+const BUSY_RETRY: Duration = Duration::from_secs(10);
+
+#[derive(Parser)]
+#[command(
+    name = "wachposten-daemon",
+    version,
+    about = "Wachposten system daemon (runs as root)"
+)]
+struct Args {
+    #[arg(long, default_value = DAEMON_SETTINGS)]
+    config: PathBuf,
+    #[arg(long, default_value = "/var/lib/wachposten")]
+    state_dir: PathBuf,
+    #[arg(long, default_value = ipc::SOCKET)]
+    socket: PathBuf,
+    /// Do not watch program starts (no fanotify).
+    #[arg(long)]
+    no_exec: bool,
+}
+
+pub enum Msg {
+    Rescan,
+    Tick,
+    Exec(ExecReport),
+    Subscribe(Client),
+    Request {
+        uid: u32,
+        admin: bool,
+        request: Request,
+        reply: Sender<Reply>,
+    },
+}
+
+struct Daemon {
+    guard: Guard,
+    scanner: Arc<MalwareScanner>,
+    settings: DaemonSettings,
+    clients: Vec<Client>,
+    exec: ExecStatus,
+    rescan_waiting: Arc<AtomicBool>,
+    tx: Sender<Msg>,
+    ticks: u64,
+}
+
+fn can_see(ev: &Event, uid: u32, admin: bool) -> bool {
+    admin || ev.uid.is_none() || ev.uid == Some(uid)
+}
+
+fn can_decide(ev: &Event, uid: u32, admin: bool) -> bool {
+    admin || (ev.kind == Kind::TempExec && ev.uid == Some(uid))
+}
+
+fn shorten(s: &str, n: usize) -> String {
+    if s.chars().count() > n {
+        format!("{}…", s.chars().take(n).collect::<String>())
+    } else {
+        s.to_string()
+    }
+}
+
+impl Daemon {
+    fn open_ids(&self) -> BTreeSet<i64> {
+        self.guard
+            .store()
+            .open_events()
+            .map(|v| v.into_iter().map(|e| e.id).collect())
+            .unwrap_or_default()
+    }
+
+    /// Send an event to every subscribed agent that may see it; drop agents that went away.
+    fn push(&mut self, ev: &Event) {
+        let ev = ipc::strip(ev.clone());
+        self.clients.retain_mut(|c| {
+            if !can_see(&ev, c.uid, c.admin) {
+                return true;
+            }
+            c.send(&Reply::Event {
+                event: ev.clone(),
+                can_decide: can_decide(&ev, c.uid, c.admin),
+            })
+        });
+    }
+
+    fn push_ids(&mut self, ids: impl IntoIterator<Item = i64>) {
+        for id in ids {
+            if let Ok(Some(ev)) = self.guard.store().event(id) {
+                self.push(&ev);
+            }
+        }
+    }
+
+    fn rescan(&mut self) -> Result<()> {
+        if wachposten_core::pkg::manager_busy() {
+            if !self.rescan_waiting.swap(true, Ordering::SeqCst) {
+                log::info!("package transaction running; checking again later");
+                let tx = self.tx.clone();
+                let flag = self.rescan_waiting.clone();
+                thread::spawn(move || {
+                    thread::sleep(BUSY_RETRY);
+                    flag.store(false, Ordering::SeqCst);
+                    let _ = tx.send(Msg::Rescan);
+                });
+            }
+            return Ok(());
+        }
+        let before = self.open_ids();
+        let events = self.guard.rescan()?;
+        let after = self.open_ids();
+        for ev in &events {
+            log::info!(
+                "event {}: {} {} ({})",
+                ev.id,
+                ev.change.as_str(),
+                ev.path,
+                ev.severity.as_str()
+            );
+            self.push(ev);
+        }
+        // Events closed without a decision (undone, deleted) reach the agents as well.
+        self.push_ids(before.difference(&after).copied().collect::<Vec<_>>());
+        Ok(())
+    }
+
+    fn tick(&mut self) -> Result<()> {
+        self.ticks += 1;
+        if self.ticks % (24 * 60) == 1 {
+            let days = self.settings.exec.history_days.max(1) as i64;
+            let n = self
+                .guard
+                .store()
+                .prune_history(Kind::TempExec, days * 86400)?;
+            if n > 0 {
+                log::info!("removed {n} old program start records");
+            }
+        }
+        self.rescan()
+    }
+
+    fn exec(&mut self, report: ExecReport) -> Result<()> {
+        let Some(root) = exec::temp_root(&report.path) else {
+            return Ok(());
+        };
+        let mut findings = report.findings.clone();
+        for reason in exec::suspicious(&report.path, &root) {
+            findings.push(Finding {
+                rule: reason.into(),
+                line: report.path.display().to_string(),
+            });
+        }
+        let severity = wachposten_core::severity_for(&findings);
+        let severity = if severity == Severity::Notice {
+            Severity::Info
+        } else {
+            severity
+        };
+        let ask = report.blocked
+            || match self.settings.exec.popup {
+                ExecPopup::Always => true,
+                ExecPopup::Suspicious => severity >= Severity::Suspicious,
+                ExecPopup::Malware => severity == Severity::Malicious,
+            };
+        let p = &report.proc;
+        let mut details = Vec::new();
+        if report.blocked {
+            details.push(tr("Der Start wurde blockiert.", "The start was blocked.").to_string());
+        }
+        if !p.comm.is_empty() {
+            details.push(format!(
+                "{} {} (PID {}), {} {}",
+                tr("Prozess", "Process"),
+                p.comm,
+                p.pid,
+                tr("Benutzer", "user"),
+                p.uid.map_or_else(|| "?".into(), users::name)
+            ));
+        }
+        if !p.cmdline.is_empty() {
+            details.push(format!(
+                "{}: {}",
+                tr("Befehl", "Command"),
+                shorten(&p.cmdline, 200)
+            ));
+        }
+        if let (Some(ppid), Some(parent)) = (p.ppid, &p.parent_comm) {
+            details.push(format!(
+                "{}: {parent} (PID {ppid})",
+                tr("Gestartet von", "Started by")
+            ));
+        }
+        let uid = p.uid.or_else(|| {
+            std::fs::metadata(&report.path)
+                .ok()
+                .map(|m| std::os::unix::fs::MetadataExt::uid(&m))
+        });
+        let event = self.guard.record_file(&FileReport {
+            path: &report.path,
+            kind: Kind::TempExec,
+            severity,
+            ask,
+            findings: &findings,
+            details: &details,
+            uid,
+        })?;
+        if let Some(ev) = event {
+            if ev.status == Status::Open {
+                log::warn!(
+                    "program start {}: {} ({})",
+                    ev.id,
+                    ev.path,
+                    ev.severity.as_str()
+                );
+                self.push(&ev);
+            } else {
+                log::debug!("program start recorded: {}", ev.path);
+            }
+        }
+        Ok(())
+    }
+
+    fn subscribe(&mut self, mut client: Client) {
+        let hello = Reply::Hello {
+            version: env!("CARGO_PKG_VERSION").into(),
+            admin: client.admin,
+        };
+        if !client.send(&hello) {
+            return;
+        }
+        for ev in self.guard.store().open_events().unwrap_or_default() {
+            if can_see(&ev, client.uid, client.admin)
+                && !client.send(&Reply::Event {
+                    can_decide: can_decide(&ev, client.uid, client.admin),
+                    event: ipc::strip(ev),
+                })
+            {
+                return;
+            }
+        }
+        log::info!(
+            "agent of {} connected{}",
+            users::name(client.uid),
+            if client.admin { " (admin)" } else { "" }
+        );
+        self.clients.push(client);
+    }
+
+    fn request(&mut self, uid: u32, admin: bool, request: Request) -> Reply {
+        match self.request_inner(uid, admin, request) {
+            Ok(reply) => reply,
+            Err(e) => Reply::Error {
+                message: format!("{e:#}"),
+            },
+        }
+    }
+
+    fn request_inner(&mut self, uid: u32, admin: bool, request: Request) -> Result<Reply> {
+        Ok(match request {
+            Request::Subscribe => Reply::Error {
+                message: "subscribe on a connection of its own".into(),
+            },
+            Request::Status => Reply::Status {
+                baseline: self.guard.store().baseline_count()?,
+                open: self
+                    .guard
+                    .store()
+                    .open_events()?
+                    .iter()
+                    .filter(|e| can_see(e, uid, admin))
+                    .count() as i64,
+                exec_watch: self.exec.watching,
+                blocking: self.exec.blocking,
+                yara_rules: self.scanner.yara.as_ref().map_or(0, YaraEngine::rule_count),
+                known_hashes: self
+                    .scanner
+                    .hashes
+                    .as_ref()
+                    .and_then(|h| h.count().ok())
+                    .unwrap_or(0),
+            },
+            Request::Events { all, limit } => {
+                let events = if all {
+                    self.guard.store().recent_events(limit.clamp(1, 1000))?
+                } else {
+                    self.guard.store().open_events()?
+                };
+                Reply::Events {
+                    events: events
+                        .into_iter()
+                        .filter(|e| can_see(e, uid, admin))
+                        .map(ipc::strip)
+                        .collect(),
+                }
+            }
+            Request::Show { id } => match self.guard.store().event(id)? {
+                Some(ev) if can_see(&ev, uid, admin) => Reply::Event {
+                    can_decide: can_decide(&ev, uid, admin),
+                    event: ipc::strip(ev),
+                },
+                _ => Reply::Error {
+                    message: format!("event {id} does not exist"),
+                },
+            },
+            Request::Decide { id, hash, decision } => {
+                let Some(ev) = self.guard.store().event(id)? else {
+                    return Ok(Reply::Error {
+                        message: format!("event {id} does not exist"),
+                    });
+                };
+                if !can_decide(&ev, uid, admin) {
+                    return Ok(Reply::Error {
+                        message: "only admins may decide on this".into(),
+                    });
+                }
+                let outcome = match decision {
+                    Decision::Allow => self.guard.allow(id, hash.as_deref())?,
+                    Decision::Remove => {
+                        if ev.kind == Kind::TempExec {
+                            let n = proc::kill_program(Path::new(&ev.path));
+                            log::info!("ended {n} processes of {}", ev.path);
+                        }
+                        self.guard.remove(id, hash.as_deref())?
+                    }
+                };
+                log::info!("event {id} {:?} by {}", decision, users::name(uid));
+                self.push_ids([id]);
+                Reply::Done {
+                    message: match outcome {
+                        Outcome::Allowed => format!("event {id} allowed"),
+                        Outcome::Removed {
+                            quarantine_id: Some(q),
+                        } => format!("event {id} removed; quarantine item {q}"),
+                        Outcome::Removed {
+                            quarantine_id: None,
+                        } => {
+                            format!("event {id} removed")
+                        }
+                    },
+                }
+            }
+            Request::Quarantine => {
+                if !admin {
+                    return Ok(Reply::Error {
+                        message: "only admins may see the system quarantine".into(),
+                    });
+                }
+                Reply::Quarantine {
+                    items: self.guard.store().quarantine_items()?,
+                }
+            }
+            Request::Restore { id, force } => {
+                if !admin {
+                    return Ok(Reply::Error {
+                        message: "only admins may restore".into(),
+                    });
+                }
+                let path = self.guard.restore(id, force)?;
+                log::info!("quarantine item {id} restored by {}", users::name(uid));
+                Reply::Done {
+                    message: format!("restored {path}"),
+                }
+            }
+        })
+    }
+}
+
+fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let args = Args::parse();
+    let settings = DaemonSettings::load(&args.config)?;
+
+    let mut guard = Guard::open(Config::system(args.state_dir.clone()))?;
+    let hashes = match HashDb::open(&hash_db_path(&args.state_dir)) {
+        Ok(db) => Some(db),
+        Err(e) => {
+            log::error!("hash list unavailable: {e:#}");
+            None
+        }
+    };
+    let yara = settings
+        .yara
+        .enabled
+        .then(|| YaraEngine::new(&settings.yara.extra_rule_dirs));
+    let online_key = settings
+        .hashes
+        .online_lookup
+        .then(|| settings.hashes.malwarebazaar_auth_key.clone())
+        .flatten();
+    let scanner = Arc::new(MalwareScanner::new(yara, hashes, online_key, 256));
+    guard.set_scanner(scanner.clone());
+
+    if !guard.is_initialized()? {
+        let n = guard.initialize()?;
+        log::info!("baseline recorded with {n} system entries");
+    }
+
+    let (tx, rx) = mpsc::channel();
+    let watch_tx = tx.clone();
+    let watch = wachposten_watch::spawn(move || {
+        let _ = watch_tx.send(Msg::Rescan);
+    })?;
+    watch.set_specs(guard.watch_specs());
+
+    let exec = if settings.exec.enabled && !args.no_exec {
+        match exec::start(&settings.exec, scanner.clone(), tx.clone()) {
+            Ok(status) => status,
+            Err(e) => {
+                log::error!("{e:#}; program starts are not watched");
+                ExecStatus::default()
+            }
+        }
+    } else {
+        ExecStatus::default()
+    };
+    log::info!(
+        "program starts: {}, blocking known malware: {}",
+        exec.watching,
+        exec.blocking
+    );
+
+    if let Some(key) = settings.hashes.malwarebazaar_auth_key.clone() {
+        wachposten_scan::spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
+    }
+
+    server::listen(&args.socket, settings.admin_groups.clone(), tx.clone())?;
+
+    let tick_tx = tx.clone();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(TICK);
+            if tick_tx.send(Msg::Tick).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut daemon = Daemon {
+        guard,
+        scanner,
+        settings,
+        clients: Vec::new(),
+        exec,
+        rescan_waiting: Arc::default(),
+        tx,
+        ticks: 0,
+    };
+    daemon.rescan()?;
+    log::info!("listening on {}", args.socket.display());
+
+    for msg in rx {
+        let rescanned = matches!(msg, Msg::Rescan | Msg::Tick);
+        let result = match msg {
+            Msg::Rescan => daemon.rescan(),
+            Msg::Tick => daemon.tick(),
+            Msg::Exec(report) => daemon.exec(report),
+            Msg::Subscribe(client) => {
+                daemon.subscribe(client);
+                Ok(())
+            }
+            Msg::Request {
+                uid,
+                admin,
+                request,
+                reply,
+            } => {
+                let answer = daemon.request(uid, admin, request);
+                let _ = reply.send(answer);
+                Ok(())
+            }
+        };
+        if let Err(e) = result {
+            log::error!("{e:#}");
+        }
+        if rescanned {
+            watch.set_specs(daemon.guard.watch_specs());
+        }
+    }
+    Ok(())
+}

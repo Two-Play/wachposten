@@ -19,6 +19,8 @@ regex.workspace = true
 log.workspace = true
 serde.workspace = true
 toml.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rusqlite.workspace = true

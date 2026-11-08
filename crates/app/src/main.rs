@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use wachposten_core::i18n;
+use wachposten_core::ipc::{self, Reply, Request};
 use wachposten_core::settings::settings_path;
 use wachposten_core::{Config, Entry, Event, Guard, Outcome, Settings, Status};
 use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, bazaar, hash_db_path};
@@ -18,6 +19,9 @@ use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, bazaar, hash_db_path};
     about = "Guard for persistence locations on Linux desktops"
 )]
 struct Cli {
+    /// Talk to the root daemon (system-wide events) instead of your own agent's data.
+    #[arg(long, global = true)]
+    system: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -112,6 +116,9 @@ fn date(ts: i64) -> String {
 }
 
 fn pretty(home: &Path, path: &str) -> String {
+    if home == Path::new("/") {
+        return path.to_string();
+    }
     match Path::new(path).strip_prefix(home) {
         Ok(rel) => format!("~/{}", rel.display()),
         Err(_) => path.to_string(),
@@ -141,7 +148,12 @@ fn show(guard: &Guard, id: i64) -> Result<()> {
     let Some(ev) = guard.store().event(id)? else {
         bail!("event {id} does not exist");
     };
-    let home = &guard.config().home;
+    show_event(&guard.config().home, &ev);
+    Ok(())
+}
+
+fn show_event(home: &Path, ev: &Event) {
+    let ev = ev.clone();
     println!("Event {}: {}", ev.id, i18n::event_title(&ev));
     println!("  {}", i18n::event_sentence(&ev));
     println!("  path:     {}", pretty(home, &ev.path));
@@ -177,7 +189,6 @@ fn show(guard: &Guard, id: i64) -> Result<()> {
             println!("  + {l}");
         }
     }
-    Ok(())
 }
 
 fn hash_status(config: &Config) -> Result<()> {
@@ -234,8 +245,129 @@ fn config_cmd(config: &Config, action: Option<ConfigAction>) -> Result<()> {
     Ok(())
 }
 
+fn socket_path() -> PathBuf {
+    std::env::var_os("WACHPOSTEN_SOCKET").map_or_else(|| PathBuf::from(ipc::SOCKET), PathBuf::from)
+}
+
+fn daemon(request: &Request) -> Result<Reply> {
+    let reply = ipc::call(&socket_path(), request).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot reach wachposten-daemon at {}: {e}",
+            socket_path().display()
+        )
+    })?;
+    if let Reply::Error { message } = reply {
+        bail!(message);
+    }
+    Ok(reply)
+}
+
+/// Commands with `--system`, answered by the daemon.
+fn system_cmd(command: Command) -> Result<()> {
+    let root = Path::new("/");
+    match command {
+        Command::Status => {
+            if let Reply::Status {
+                baseline,
+                open,
+                exec_watch,
+                blocking,
+                yara_rules,
+                known_hashes,
+            } = daemon(&Request::Status)?
+            {
+                println!("daemon:         running");
+                println!("baseline:       {baseline} entries");
+                println!("open events:    {open}");
+                println!(
+                    "program starts: {}",
+                    if exec_watch { "watched" } else { "not watched" }
+                );
+                println!(
+                    "blocking:       {}",
+                    if blocking {
+                        "known malware is blocked"
+                    } else {
+                        "off"
+                    }
+                );
+                println!("YARA-X rules:   {yara_rules}");
+                println!("known hashes:   {known_hashes}");
+            }
+        }
+        Command::Events { all, limit } => {
+            if let Reply::Events { events } = daemon(&Request::Events { all, limit })? {
+                if events.is_empty() {
+                    println!("no events");
+                }
+                for ev in &events {
+                    print_event_line(root, ev);
+                }
+            }
+        }
+        Command::Show { id } => {
+            if let Reply::Event { event, can_decide } = daemon(&Request::Show { id })? {
+                show_event(root, &event);
+                if !can_decide && event.status == Status::Open {
+                    println!("\n(an admin decides about this event)");
+                }
+            }
+        }
+        Command::Allow { id } | Command::Remove { id } => {
+            let decision = if matches!(command, Command::Allow { .. }) {
+                ipc::Decision::Allow
+            } else {
+                ipc::Decision::Remove
+            };
+            if let Reply::Done { message } = daemon(&Request::Decide {
+                id,
+                hash: None,
+                decision,
+            })? {
+                println!("{message}");
+            }
+        }
+        Command::Quarantine => {
+            if let Reply::Quarantine { items } = daemon(&Request::Quarantine)? {
+                print_quarantine(root, &items);
+            }
+        }
+        Command::Restore { id, force } => {
+            if let Reply::Done { message } = daemon(&Request::Restore { id, force })? {
+                println!("{message}");
+            }
+        }
+        _ => bail!("this command does not work with --system"),
+    }
+    Ok(())
+}
+
+fn print_quarantine(home: &Path, items: &[wachposten_core::QuarantineItem]) {
+    if items.is_empty() {
+        println!("quarantine is empty");
+    }
+    for q in items {
+        println!(
+            "{:>5}  {}  {:<14} {:<9} {}{}",
+            q.id,
+            date(q.created_at),
+            q.kind.as_str(),
+            q.entry_type,
+            pretty(home, &q.original_path),
+            if q.restored_at.is_some() {
+                "  (restored)"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.system {
+        return system_cmd(cli.command.unwrap_or(Command::Status));
+    }
     let config = Config::from_env()?;
     let mut guard = Guard::open(config.clone())?;
     let home = config.home.clone();
@@ -290,27 +422,7 @@ fn main() -> Result<()> {
                 println!("event {id} removed; quarantine item {q} (wachposten restore {q})");
             }
         }
-        Command::Quarantine => {
-            let items = guard.store().quarantine_items()?;
-            if items.is_empty() {
-                println!("quarantine is empty");
-            }
-            for q in items {
-                println!(
-                    "{:>5}  {}  {:<12} {:<9} {}{}",
-                    q.id,
-                    date(q.created_at),
-                    q.kind.as_str(),
-                    q.entry_type,
-                    pretty(&home, &q.original_path),
-                    if q.restored_at.is_some() {
-                        "  (restored)"
-                    } else {
-                        ""
-                    }
-                );
-            }
-        }
+        Command::Quarantine => print_quarantine(&home, &guard.store().quarantine_items()?),
         Command::Restore { id, force } => {
             let path = guard.restore(id, force)?;
             println!("restored {}", pretty(&home, &path));

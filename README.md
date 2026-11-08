@@ -14,7 +14,8 @@ Known malware is recognised in later stages with YARA-X rules and hash lists, an
 be added for Windows files and mail attachments. The core is the persistence and behaviour
 watch, because no maintained open signature database for Linux desktop malware exists.
 
-**Status: stage 2 of 5.** The agent watches the home directory and scans downloads. See [Roadmap](#roadmap).
+**Status: stage 3 of 5.** The agent watches the home directory and scans downloads; the root
+daemon watches system-wide locations and program starts from temporary folders. See [Roadmap](#roadmap).
 
 ## What is watched (stage 1)
 
@@ -67,6 +68,52 @@ A hit raises a "Malware detected" message. **Remove** moves the file into quaran
 **Allow** remembers its hash so it is not reported again. To check that everything works, put a
 file with the text `WACHPOSTEN-TEST-SIGNATURE-7f3a9c2e-NOT-MALWARE` into the download folder.
 
+## System daemon (stage 3)
+
+`wachposten-daemon` runs as root and cannot be stopped by malware running as a normal user.
+
+**Program starts from temporary folders.** fanotify reports every program started from `/tmp`,
+`/var/tmp`, `/dev/shm`, `/run/user/<uid>` and `~/.cache`. Each file is checked with YARA-X and
+the hash list.
+
+- On tmpfs (`/tmp`, `/dev/shm`, `/run/user`) the start is held until the check is done, and
+  known malware is **refused**. The check has a time budget (1.5 s); after it, or on any error,
+  the start is allowed. If the daemon dies, the kernel lets all starts through. Only tmpfs is
+  held, so programs in `/usr` are never slowed down.
+- `/var/tmp` and `~/.cache` are reported right after the start.
+- A question pops up for known malware, programs in hidden folders (`/tmp/.x/…`), programs in
+  `/dev/shm` and programs named like system processes (`kworker`, `sshd`, …). Everything else is
+  only kept in the history (`wachposten --system events --all`), so builds and installers in
+  `/tmp` do not cause a flood of messages.
+- The person who started the program decides. **Remove** ends its processes and moves the file
+  into quarantine; this also works when the program already deleted itself.
+
+**System-wide persistence.** The daemon keeps a baseline of `/etc/systemd/system`,
+`/etc/systemd/user`, `/etc/udev/rules.d`, `rc.local`, `/etc/ld.so.preload` and the linker
+configuration, `/etc/crontab`, `/etc/cron.*`, `/var/spool/cron` (everybody's crontab),
+`/etc/profile`, `/etc/profile.d`, the system shell files and root's, `/etc/environment`,
+`/etc/xdg/autostart`, root's `authorized_keys`, `sshd_config`, `/etc/sudoers(.d)`, polkit rules
+and `/etc/pam.d`.
+
+- Files that rpm or dpkg installed unchanged are accepted without a question; checks wait while
+  a package transaction runs. Enabling a packaged service still asks.
+- Everybody logged in sees system events; members of `wheel`, `sudo` or `admin` decide.
+- Removed files keep their owner and mode when they are restored.
+
+The daemon talks to the agents and the CLI over `/run/wachposten/daemon.sock` and identifies
+callers by their user ID (`SO_PEERCRED`). Settings live in `/etc/wachposten/daemon.toml`, see
+[packaging/daemon.toml](packaging/daemon.toml). The systemd unit is hardened but deliberately
+keeps the real `/tmp`, `/dev/shm`, home folders and `/etc` visible; its fanotify marks are on
+whole file systems so they also see starts outside its own mount namespace.
+
+```bash
+cargo build --release
+sudo install -m755 target/release/wachposten-daemon /usr/local/bin/
+sudo install -m644 packaging/systemd/wachposten-daemon.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now wachposten-daemon
+wachposten --system status
+```
+
 ## Usage
 
 ```bash
@@ -89,6 +136,8 @@ wachposten scan-file <files> # check files for known malware (exit code 1 on a h
 wachposten rules             # rule files and whether they compiled
 wachposten hashes status|update|import <file>
 wachposten config [show|set-key <key>|unset-key|online-lookup on|off|downloads on|off]
+
+wachposten --system status|events [--all]|show <id>|allow <id>|remove <id>|quarantine|restore <id>
 ```
 
 Settings live in `$XDG_CONFIG_HOME/wachposten/config.toml` (mode 0600); restart the agent
@@ -101,8 +150,13 @@ starts with `de`, English otherwise.
 ## Limits
 
 - The agent runs as the user. Malware running as the same user can stop it or change its
-  database. The root daemon in stage 3 closes this gap for system locations and process starts.
+  database. The root daemon covers system locations and program starts, but not yet the home
+  locations the agent watches.
 - Wachposten does not know yet which program made a change (stage 5, eBPF).
+- Programs run through an interpreter (`sh /tmp/x.sh`, `python3 /tmp/x.py`) or from memory
+  (`memfd`) are not seen as program starts; stage 5 adds eBPF for that.
+- A program in `/var/tmp` or `~/.cache` that deletes itself right after starting may escape the
+  check, since those starts are not held.
 - Removing an autostart entry does not stop a program that already runs.
 - Archives are not unpacked; only the archive itself is checked. ClamAV (stage 4) covers that.
 - Only the top level of the download folder is watched.
@@ -111,7 +165,7 @@ starts with `de`, English otherwise.
 
 1. **Persistence in the home directory** – agent, tray, notifications, CLI *(done)*
 2. **Downloads, hashes, YARA-X** – scan new downloads, local MalwareBazaar hash list (opt-in), curated YARA-X rules *(done)*
-3. **Daemon** – fanotify for program starts from `/tmp`, `/var/tmp`, `/dev/shm`, `~/.cache`; system locations such as `/etc/ld.so.preload`, `/etc/cron*`, `/etc/systemd/system`
+3. **Daemon** – fanotify for program starts from `/tmp`, `/var/tmp`, `/dev/shm`, `~/.cache`; system locations such as `/etc/ld.so.preload`, `/etc/cron*`, `/etc/systemd/system` *(done)*
 4. **Slint window and ClamAV** – history, allowed entries, quarantine, settings; optional ClamAV via `clamd`
 5. **eBPF and packages** – process starts through interpreters and `memfd`, which program changed a file, RPM
 
@@ -123,9 +177,14 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The workspace has `crates/core` (baseline, analysis, decisions, settings, SQLite),
-`crates/watch` (inotify), `crates/scan` (YARA-X, hash list, MalwareBazaar), `crates/agent`
-(tray and notifications) and `crates/app` (CLI, later the window).
+The workspace has `crates/core` (baseline, analysis, decisions, settings, IPC, SQLite),
+`crates/watch` (inotify), `crates/scan` (YARA-X, hash list, MalwareBazaar), `crates/daemon`
+(fanotify, system locations, socket), `crates/agent` (tray and notifications) and `crates/app`
+(CLI, later the window).
+
+`test/vm.py` boots a Fedora Cloud VM with QEMU (no root needed on the host), installs the
+daemon as a systemd service and checks blocking, program start reports, system persistence,
+rpm checks and permissions with a second, non-admin user.
 
 `yara-x` 1.23 does not build with the newest `rsa` release candidate, so `Cargo.lock` pins
 `rsa` to `0.10.0-rc.19`. Keep that pin when running `cargo update`.

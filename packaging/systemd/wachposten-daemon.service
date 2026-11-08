@@ -1,0 +1,37 @@
+[Unit]
+Description=Wachposten system daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wachposten-daemon
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=wachposten
+RuntimeDirectoryMode=0755
+StateDirectory=wachposten
+StateDirectoryMode=0700
+ConfigurationDirectory=wachposten
+
+# fanotify (SYS_ADMIN), reading and restoring files of every user (DAC_*, FOWNER, CHOWN),
+# ending removed programs (KILL) and reading their /proc entries (SYS_PTRACE).
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN CAP_KILL CAP_SYS_PTRACE
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Deliberately not set: PrivateTmp, PrivateDevices, ProtectHome and ProtectSystem. The daemon has
+# to see the real /tmp, /dev/shm and home folders and must be able to restore files in /etc.
+# MemoryDenyWriteExecute is not set because YARA-X compiles rules to machine code.
+
+[Install]
+WantedBy=multi-user.target

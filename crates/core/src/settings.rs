@@ -185,3 +185,77 @@ mod tests {
         }
     }
 }
+
+/// When a program start from a temporary folder raises a question.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecPopup {
+    /// Known malware, hidden names, `/dev/shm` and names posing as kernel threads.
+    Suspicious,
+    /// Every program not allowed before (once per file).
+    Always,
+    /// Known malware only.
+    Malware,
+}
+
+/// Settings of the root daemon in `/etc/wachposten/daemon.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct DaemonSettings {
+    /// Groups whose members may decide on system-wide events.
+    pub admin_groups: Vec<String>,
+    pub exec: ExecSettings,
+    pub yara: Yara,
+    pub hashes: Hashes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecSettings {
+    /// Watch program starts from temporary folders.
+    pub enabled: bool,
+    /// Refuse to start known malware from tmpfs folders (`/tmp`, `/dev/shm`, `/run/user`).
+    pub block_known_malware: bool,
+    pub popup: ExecPopup,
+    /// Time a held-up program start may spend in the scan, in milliseconds.
+    pub scan_budget_ms: u64,
+    /// History of harmless program starts is kept this many days.
+    pub history_days: u64,
+}
+
+impl Default for DaemonSettings {
+    fn default() -> Self {
+        DaemonSettings {
+            admin_groups: vec!["wheel".into(), "sudo".into(), "admin".into()],
+            exec: ExecSettings::default(),
+            yara: Yara::default(),
+            hashes: Hashes::default(),
+        }
+    }
+}
+
+impl Default for ExecSettings {
+    fn default() -> Self {
+        ExecSettings {
+            enabled: true,
+            block_known_malware: true,
+            popup: ExecPopup::Suspicious,
+            scan_budget_ms: 1500,
+            history_days: 30,
+        }
+    }
+}
+
+pub const DAEMON_SETTINGS: &str = "/etc/wachposten/daemon.toml";
+
+impl DaemonSettings {
+    pub fn load(path: &Path) -> Result<DaemonSettings> {
+        match fs::read_to_string(path) {
+            Ok(text) => {
+                toml::from_str(&text).with_context(|| format!("invalid {}", path.display()))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(DaemonSettings::default()),
+            Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+        }
+    }
+}

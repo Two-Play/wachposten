@@ -142,6 +142,81 @@ pub fn home_targets(home: &Path, crontab: bool) -> Vec<Target> {
     targets
 }
 
+/// System-wide persistence locations, watched by the root daemon.
+pub fn system_targets() -> Vec<Target> {
+    use Kind::*;
+    let file = |kind, path: &str| Target {
+        kind,
+        path: TargetPath::File(PathBuf::from(path)),
+    };
+    let dir = |kind, path: &str, recursive, filter| Target {
+        kind,
+        path: TargetPath::Dir {
+            path: PathBuf::from(path),
+            recursive,
+            filter,
+        },
+    };
+    let mut t = vec![
+        dir(
+            SystemdSystem,
+            "/etc/systemd/system",
+            true,
+            Filter::SystemdUnits,
+        ),
+        dir(
+            SystemdSystem,
+            "/etc/systemd/user",
+            true,
+            Filter::SystemdUnits,
+        ),
+        dir(SystemdSystem, "/etc/udev/rules.d", false, Filter::Any),
+        file(SystemdSystem, "/etc/rc.local"),
+        file(SystemdSystem, "/etc/rc.d/rc.local"),
+        file(Preload, "/etc/ld.so.preload"),
+        file(Preload, "/etc/ld.so.conf"),
+        dir(Preload, "/etc/ld.so.conf.d", false, Filter::Conf),
+        file(Crontab, "/etc/crontab"),
+        file(Crontab, "/etc/anacrontab"),
+        dir(Crontab, "/etc/cron.d", false, Filter::Any),
+        dir(Crontab, "/etc/cron.hourly", false, Filter::Any),
+        dir(Crontab, "/etc/cron.daily", false, Filter::Any),
+        dir(Crontab, "/etc/cron.weekly", false, Filter::Any),
+        dir(Crontab, "/etc/cron.monthly", false, Filter::Any),
+        dir(Crontab, "/var/spool/cron", true, Filter::Any),
+        dir(ShellRc, "/etc/profile.d", false, Filter::Any),
+        dir(Environment, "/etc/environment.d", false, Filter::Conf),
+        file(Environment, "/etc/environment"),
+        file(Environment, "/etc/security/pam_env.conf"),
+        dir(Autostart, "/etc/xdg/autostart", false, Filter::Desktop),
+        dir(Session, "/etc/X11/xinit/xinitrc.d", false, Filter::Any),
+        file(Ssh, "/root/.ssh/authorized_keys"),
+        file(Ssh, "/root/.ssh/authorized_keys2"),
+        file(Ssh, "/etc/ssh/sshd_config"),
+        dir(Ssh, "/etc/ssh/sshd_config.d", false, Filter::Conf),
+        file(Privileges, "/etc/sudoers"),
+        dir(Privileges, "/etc/sudoers.d", false, Filter::Any),
+        dir(Privileges, "/etc/polkit-1/rules.d", false, Filter::Any),
+        dir(Privileges, "/etc/pam.d", false, Filter::Any),
+    ];
+    for rc in [
+        "/etc/profile",
+        "/etc/bashrc",
+        "/etc/bash.bashrc",
+        "/etc/zshrc",
+        "/etc/zprofile",
+        "/etc/zshenv",
+        "/etc/zlogin",
+        "/root/.bashrc",
+        "/root/.bash_profile",
+        "/root/.profile",
+        "/root/.zshrc",
+    ] {
+        t.push(file(ShellRc, rc));
+    }
+    t
+}
+
 fn is_editor_temp(name: &str) -> bool {
     name.ends_with('~')
         || name.ends_with(".swp")
@@ -249,7 +324,8 @@ fn collect_dir(
 }
 
 /// Directories a watcher has to observe for the given targets, each with an optional list of
-/// names that matter. `None` means every name in that directory matters.
+/// names that matter. `None` means every name in that directory matters. Missing directories
+/// are covered by watching their nearest existing ancestor below `home` (or `/`).
 pub fn watch_specs(home: &Path, targets: &[Target]) -> Vec<(PathBuf, Option<Vec<String>>)> {
     let mut specs: BTreeMap<PathBuf, Option<Vec<String>>> = BTreeMap::new();
     let mut add_name = |dir: PathBuf, name: Option<String>| {
