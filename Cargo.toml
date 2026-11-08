@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/watch", "crates/agent", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.89"
+
+[workspace.dependencies]
+wachposten-core = { path = "crates/core" }
+wachposten-watch = { path = "crates/watch" }
+anyhow = "1"
+thiserror = "2"
+inotify = "0.11"
+ksni = { version = "0.3", features = ["blocking"] }
+notify-rust = "4.19"
+rusqlite = { version = "0.41", features = ["bundled"] }
+similar = "3"
+clap = { version = "4.6", features = ["derive"] }
+sha2 = "0.11"
+hex = "0.4"
+regex = "1"
+log = "0.4"
+env_logger = "0.11"
+tempfile = "3"
+nix = { version = "0.31", features = ["poll"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

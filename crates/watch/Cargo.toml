@@ -1,0 +1,17 @@
+[package]
+name = "wachposten-watch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+inotify.workspace = true
+nix.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

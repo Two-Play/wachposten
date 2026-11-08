@@ -1,0 +1,18 @@
+[package]
+name = "wachposten-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wachposten-core.workspace = true
+wachposten-watch.workspace = true
+anyhow.workspace = true
+ksni.workspace = true
+notify-rust.workspace = true
+log.workspace = true
+env_logger.workspace = true
