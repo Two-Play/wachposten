@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Wachposten
+GenericName=Security guard
+GenericName[de]=Sicherheitswächter
+Comment=Watch autostart, services and downloads for malware
+Comment[de]=Autostart, Dienste und Downloads auf Schadsoftware überwachen
+Exec=wachposten window
+Icon=wachposten
+Categories=System;Security;
+Keywords=malware;virus;security;autostart;

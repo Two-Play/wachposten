@@ -4,6 +4,14 @@ use std::ffi::CString;
 
 use nix::unistd::{Gid, Group, Uid, User, getgrouplist};
 
+/// The home folder of a user.
+pub fn home(uid: u32) -> Option<std::path::PathBuf> {
+    User::from_uid(Uid::from_raw(uid))
+        .ok()
+        .flatten()
+        .map(|u| u.dir)
+}
+
 pub fn name(uid: u32) -> String {
     User::from_uid(Uid::from_raw(uid))
         .ok()

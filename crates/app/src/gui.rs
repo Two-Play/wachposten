@@ -139,6 +139,13 @@ fn detail(state: &State, item: Option<&Item>) -> EventDetail {
         kind: i18n::kind_label(ev.kind).into(),
         findings: strings(findings),
         lines: strings(lines),
+        actor: ev
+            .actor
+            .as_deref()
+            .map_or_else(String::new, |a| {
+                format!("{}: {a}", tr("Geändert von", "Changed by"))
+            })
+            .into(),
         lines_title: if ev.kind.is_file_report() {
             tr("Einzelheiten", "Details")
         } else {
@@ -217,16 +224,24 @@ fn load(state: &mut State, ui: &AppWindow) -> Result<()> {
         .and_then(|h| h.count())
         .unwrap_or(0);
     let settings = Settings::load(&state.home).unwrap_or_default();
-    let (exec_watch, blocking, sys_rules, sys_hashes, sys_clam) = match &daemon_status {
+    let (exec_watch, blocking, sys_rules, sys_hashes, sys_clam, ebpf) = match &daemon_status {
         Some(Reply::Status {
             exec_watch,
             blocking,
             yara_rules,
             known_hashes,
             clamav,
+            ebpf,
             ..
-        }) => (*exec_watch, *blocking, *yara_rules, *known_hashes, *clamav),
-        _ => (false, false, 0, 0, false),
+        }) => (
+            *exec_watch,
+            *blocking,
+            *yara_rules,
+            *known_hashes,
+            *clamav,
+            *ebpf,
+        ),
+        _ => (false, false, 0, 0, false, false),
     };
     ui.set_status(StatusInfo {
         agent: crate::agent_running(state.guard.config()),
@@ -234,6 +249,7 @@ fn load(state: &mut State, ui: &AppWindow) -> Result<()> {
         admin,
         exec_watch,
         blocking,
+        ebpf,
         yara_rules: state.yara_rules.max(sys_rules) as i32,
         known_hashes: local_hashes.max(sys_hashes) as i32,
         hash_updates: settings.hashes.malwarebazaar_auth_key.is_some(),

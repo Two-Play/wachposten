@@ -72,8 +72,21 @@ pub fn running(path: &Path) -> Vec<i32> {
         .collect()
 }
 
-/// End all processes of a program. Returns how many were signalled.
+/// End all processes of a program. Returns how many were signalled. `/proc/<pid>/exe` (a
+/// program started from memory) ends that one process.
 pub fn kill_program(path: &Path) -> usize {
+    let s = path.to_string_lossy();
+    if let Some(pid) = s
+        .strip_prefix("/proc/")
+        .and_then(|r| r.strip_suffix("/exe"))
+        .and_then(|p| p.parse::<i32>().ok())
+    {
+        let ok = kill(Pid::from_raw(pid), Signal::SIGKILL).is_ok();
+        if ok {
+            log::warn!("killed process {pid} (started from memory)");
+        }
+        return usize::from(ok);
+    }
     running(path)
         .into_iter()
         .filter(|pid| {

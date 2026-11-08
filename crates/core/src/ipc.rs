@@ -56,8 +56,15 @@ pub enum Request {
     Revoke {
         hash: String,
     },
+    /// Which programs recently wrote these paths. Only paths in the caller's home folder are
+    /// answered, unless the caller is an admin.
+    WhoWrote {
+        paths: Vec<String>,
+    },
 }
 
+// Replies only live while they cross the socket; boxing the large variant would only add noise.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "kebab-case")]
 pub enum Reply {
@@ -83,12 +90,18 @@ pub enum Reply {
         known_hashes: i64,
         #[serde(default)]
         clamav: bool,
+        #[serde(default)]
+        ebpf: bool,
     },
     Quarantine {
         items: Vec<QuarantineItem>,
     },
     Allowlist {
         items: Vec<crate::store::AllowedFile>,
+    },
+    /// One entry per asked path, in the same order.
+    Writers {
+        writers: Vec<Option<String>>,
     },
     Done {
         message: String,

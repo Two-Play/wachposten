@@ -278,6 +278,9 @@ pub struct Event {
     /// system-wide entries and events of the agent itself.
     #[serde(default)]
     pub uid: Option<u32>,
+    /// The program that made the change, if known (from the daemon's eBPF part).
+    #[serde(default)]
+    pub actor: Option<String>,
 }
 
 impl Event {

@@ -1,6 +1,7 @@
 //! `wachposten-daemon`: runs as root. Watches system-wide persistence locations and program
 //! starts from temporary folders, and tells the agents of logged-in people about them.
 
+mod ebpf;
 mod exec;
 mod proc;
 mod server;
@@ -69,6 +70,8 @@ struct Daemon {
     rescan_waiting: Arc<AtomicBool>,
     tx: Sender<Msg>,
     ticks: u64,
+    writers: ebpf::SharedWriters,
+    ebpf: bool,
 }
 
 fn can_see(ev: &Event, uid: u32, admin: bool) -> bool {
@@ -133,8 +136,20 @@ impl Daemon {
             return Ok(());
         }
         let before = self.open_ids();
-        let events = self.guard.rescan()?;
+        let mut events = self.guard.rescan()?;
         let after = self.open_ids();
+        for ev in &mut events {
+            let writer = self
+                .writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .recent(Path::new(&ev.path))
+                .map(ebpf::Writer::describe);
+            if let Some(actor) = writer {
+                self.guard.store().set_actor(ev.id, &actor)?;
+                ev.actor = Some(actor);
+            }
+        }
         for ev in &events {
             log::info!(
                 "event {}: {} {} ({})",
@@ -166,7 +181,14 @@ impl Daemon {
     }
 
     fn exec(&mut self, report: ExecReport) -> Result<()> {
-        let Some(root) = exec::temp_root(&report.path) else {
+        // A program started from memory has no folder; it is reported through /proc/<pid>/exe.
+        let from_memory = report
+            .via
+            .as_deref()
+            .is_some_and(|v| v.starts_with("/memfd:"));
+        let Some(root) =
+            exec::temp_root(&report.path).or_else(|| from_memory.then(|| PathBuf::from("/proc")))
+        else {
             return Ok(());
         };
         let mut findings = report.findings.clone();
@@ -190,6 +212,19 @@ impl Daemon {
             };
         let p = &report.proc;
         let mut details = Vec::new();
+        if let Some(via) = &report.via {
+            if via.starts_with("/memfd:") {
+                details.push(format!(
+                    "{}: {via}",
+                    tr("Aus dem Arbeitsspeicher gestartet", "Started from memory")
+                ));
+            } else {
+                details.push(format!(
+                    "{}: {via}",
+                    tr("Über Interpreter", "Through interpreter")
+                ));
+            }
+        }
         if report.blocked {
             details.push(tr("Der Start wurde blockiert.", "The start was blocked.").to_string());
         }
@@ -309,7 +344,24 @@ impl Daemon {
                     .clamav
                     .as_ref()
                     .is_some_and(|c| c.ping().is_ok()),
+                ebpf: self.ebpf,
             },
+            Request::WhoWrote { paths } => {
+                let home = users::home(uid);
+                let writers = self.writers.lock().unwrap_or_else(|e| e.into_inner());
+                Reply::Writers {
+                    writers: paths
+                        .iter()
+                        .map(|p| {
+                            let path = Path::new(p);
+                            let mine = home.as_ref().is_some_and(|h| path.starts_with(h));
+                            (admin || mine)
+                                .then(|| writers.recent(path).map(ebpf::Writer::describe))
+                                .flatten()
+                        })
+                        .collect(),
+                }
+            }
             Request::Allowlist => Reply::Allowlist {
                 items: if admin {
                     self.guard.store().allowlist()?
@@ -471,6 +523,17 @@ fn main() -> Result<()> {
         exec.blocking
     );
 
+    let writers = ebpf::SharedWriters::default();
+    let ebpf_on = settings.exec.ebpf
+        && !args.no_exec
+        && match ebpf::start(tx.clone(), scanner.clone(), writers.clone()) {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("{e:#}; scripts, memory programs and writers are not watched");
+                false
+            }
+        };
+
     if let Some(key) = settings.hashes.malwarebazaar_auth_key.clone() {
         wachposten_scan::spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
     }
@@ -496,6 +559,8 @@ fn main() -> Result<()> {
         rescan_waiting: Arc::default(),
         tx,
         ticks: 0,
+        writers,
+        ebpf: ebpf_on,
     };
     daemon.rescan()?;
     log::info!("listening on {}", args.socket.display());

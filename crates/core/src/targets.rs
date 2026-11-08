@@ -248,7 +248,13 @@ pub fn read_entry(path: &Path) -> io::Result<Option<Entry>> {
         Err(e) => return Err(e),
     };
     if meta.file_type().is_symlink() {
-        let target = fs::read_link(path)?.to_string_lossy().into_owned();
+        // A link that vanished in between counts as missing (also /proc/<pid>/exe of a
+        // process that just ended).
+        let target = match fs::read_link(path) {
+            Ok(t) => t.to_string_lossy().into_owned(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
         let hash = format!("link:{}", hex::encode(Sha256::digest(target.as_bytes())));
         return Ok(Some(Entry::Symlink { hash, target }));
     }

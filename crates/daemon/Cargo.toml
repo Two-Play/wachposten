@@ -17,6 +17,7 @@ log.workspace = true
 env_logger.workspace = true
 nix.workspace = true
 clap.workspace = true
+aya = { version = "0.16", default-features = false }
 
 [dev-dependencies]
 tempfile.workspace = true

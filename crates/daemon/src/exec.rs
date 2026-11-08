@@ -40,6 +40,8 @@ pub struct ExecReport {
     pub proc: ProcInfo,
     pub findings: Vec<Finding>,
     pub blocked: bool,
+    /// How it ran when it was not started directly: the interpreter's name, or the memfd name.
+    pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -242,6 +244,7 @@ pub fn start(
                         proc,
                         findings,
                         blocked: false,
+                        via: None,
                     };
                     if tx.send(Msg::Exec(report)).is_err() {
                         break;
@@ -388,6 +391,7 @@ fn handle_perm(
                     proc: proc::info(event.pid()),
                     findings,
                     blocked,
+                    via: None,
                 });
             }
         }

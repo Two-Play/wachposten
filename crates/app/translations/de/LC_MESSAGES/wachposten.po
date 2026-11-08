@@ -188,3 +188,9 @@ msgid "{n} rule"
 msgid_plural "{n} rules"
 msgstr[0] "{n} Regel"
 msgstr[1] "{n} Regeln"
+
+msgid "Scripts, memory programs, who changed what"
+msgstr "Skripte, Programme aus dem Speicher, wer was ändert"
+
+msgid "watched with eBPF"
+msgstr "überwacht mit eBPF"

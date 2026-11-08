@@ -45,6 +45,13 @@ pub fn body(home: &Path, ev: &Event) -> String {
         escape(i18n::event_sentence(ev)),
         escape(&pretty_path(home, &ev.path)),
     ];
+    if let Some(actor) = &ev.actor {
+        out.push(format!(
+            "✎ {}: {}",
+            tr("Geändert von", "Changed by"),
+            escape(&shorten(actor))
+        ));
+    }
     if let Some(Entry::Symlink { target, .. }) = &ev.new_entry {
         out.push(format!("→ {}", escape(target)));
     }

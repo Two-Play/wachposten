@@ -245,6 +245,9 @@ pub struct ExecSettings {
     pub scan_budget_ms: u64,
     /// History of harmless program starts is kept this many days.
     pub history_days: u64,
+    /// Use eBPF for scripts run through interpreters, programs started from memory, and to name
+    /// the program behind a change.
+    pub ebpf: bool,
 }
 
 impl Default for DaemonSettings {
@@ -267,6 +270,7 @@ impl Default for ExecSettings {
             popup: ExecPopup::Suspicious,
             scan_budget_ms: 1500,
             history_days: 30,
+            ebpf: true,
         }
     }
 }

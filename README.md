@@ -14,7 +14,7 @@ Known malware is recognised in later stages with YARA-X rules and hash lists, an
 be added for Windows files and mail attachments. The core is the persistence and behaviour
 watch, because no maintained open signature database for Linux desktop malware exists.
 
-**Status: stage 4 of 5.** The agent watches the home directory and scans downloads; the root
+**Status: all 5 stages built.** The agent watches the home directory and scans downloads; the root
 daemon watches system-wide locations and program starts from temporary folders; a window shows
 it all. See [Roadmap](#roadmap).
 
@@ -136,6 +136,34 @@ programs are left to YARA-X. ClamAV is skipped while a program start is held up.
 clamd socket belongs to the `virusgroup` group, so the agent needs that group or uses the
 daemon's scans.
 
+## eBPF and packages (stage 5)
+
+The daemon loads a small eBPF program (C, `crates/daemon/bpf/`, built with clang and loaded
+with aya). It only uses syscall tracepoints with a fixed layout, so it needs no kernel headers
+of the running kernel and no CO-RE; kernels from 5.8 on work.
+
+- **Scripts through an interpreter.** `sh /tmp/x.sh`, `python3 /tmp/x.py` and the like are
+  seen at `execve`, with their arguments, and handled like programs in temporary folders.
+- **Programs started from memory** (`memfd_create` + `execve`) always raise a question; the
+  memory file is scanned through `/proc/<pid>/exe`, and Remove ends the process.
+- **Who changed what.** Writes, renames and links into watched locations are noted with the
+  process. Events then say for example
+  `changed by: python3 (PID 4242, anna) – python3 /tmp/.x/inst.py ← bash (PID 4100)`.
+  The agent asks the daemon about changes in its home folder; the daemon answers only for the
+  caller's own home folder, admins for everything.
+
+Without clang at build time the daemon is built without this part and says so at start.
+
+**RPM.** `packaging/build-rpm.sh` builds an RPM from the working tree with all crates vendored
+(offline build). It installs the three programs to `/usr/bin`, the daemon unit, a user unit,
+`/etc/wachposten/daemon.toml`, a menu entry and an XDG autostart entry for the agent.
+
+```bash
+packaging/build-rpm.sh
+sudo dnf install target/rpm/RPMS/x86_64/wachposten-0.1.0-1.*.x86_64.rpm
+sudo systemctl enable --now wachposten-daemon
+```
+
 ## Usage
 
 ```bash
@@ -174,11 +202,14 @@ starts with `de`, English otherwise.
 - The agent runs as the user. Malware running as the same user can stop it or change its
   database. The root daemon covers system locations and program starts, but not yet the home
   locations the agent watches.
-- Wachposten does not know yet which program made a change (stage 5, eBPF).
-- Programs run through an interpreter (`sh /tmp/x.sh`, `python3 /tmp/x.py`) or from memory
-  (`memfd`) are not seen as program starts; stage 5 adds eBPF for that.
-- A program in `/var/tmp` or `~/.cache` that deletes itself right after starting may escape the
-  check, since those starts are not held.
+- Scripts through an interpreter and programs from memory are reported, not blocked. A
+  program in `/var/tmp` or `~/.cache` that deletes itself right after starting may escape the
+  scan, since those starts are not held.
+- Who changed something is known only while the daemon (with eBPF) runs, and for ten minutes.
+  Writes through a file opened earlier, or by a process that already ended, are named by what
+  was known when the file was opened.
+- Code passed inline (`bash -c '…'`, `python3 -c '…'`) is not scanned.
+- The `wachposten` program (CLI and window) needs fontconfig through Slint.
 - Removing an autostart entry does not stop a program that already runs.
 - Archives are not unpacked; only the archive itself is checked. ClamAV (stage 4) covers that.
 - Only the top level of the download folder is watched.
@@ -189,7 +220,7 @@ starts with `de`, English otherwise.
 2. **Downloads, hashes, YARA-X** – scan new downloads, local MalwareBazaar hash list (opt-in), curated YARA-X rules *(done)*
 3. **Daemon** – fanotify for program starts from `/tmp`, `/var/tmp`, `/dev/shm`, `~/.cache`; system locations such as `/etc/ld.so.preload`, `/etc/cron*`, `/etc/systemd/system` *(done)*
 4. **Slint window and ClamAV** – history, allowed entries, quarantine, settings; optional ClamAV via `clamd` *(done)*
-5. **eBPF and packages** – process starts through interpreters and `memfd`, which program changed a file, RPM
+5. **eBPF and packages** – process starts through interpreters and `memfd`, which program changed a file, RPM *(done)*
 
 ## Development
 
@@ -205,8 +236,8 @@ The workspace has `crates/core` (baseline, analysis, decisions, settings, IPC, S
 (CLI and the Slint window; texts in `ui/`, German in `translations/`).
 
 `test/vm.py` boots a Fedora Cloud VM with QEMU (no root needed on the host), installs the
-daemon as a systemd service and checks blocking, program start reports, system persistence,
-rpm checks and permissions with a second, non-admin user.
+daemon as a systemd service (or the RPM with `--rpm`) and checks blocking, program start
+reports, system persistence, rpm checks, eBPF and permissions with a second, non-admin user.
 
 `yara-x` 1.23 does not build with the newest `rsa` release candidate, so `Cargo.lock` pins
 `rsa` to `0.10.0-rc.19`. Keep that pin when running `cargo update`.

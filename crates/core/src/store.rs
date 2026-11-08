@@ -161,7 +161,7 @@ fn decode_findings(s: &str) -> Vec<Finding> {
 
 const EVENT_COLS: &str = "id, created_at, updated_at, path, kind, change, severity, status, old_hash, \
      new_type, new_hash, new_mode, new_size, new_content, new_link_target, findings, added_lines, \
-     resolved_at, quarantine_id, uid";
+     resolved_at, quarantine_id, uid, actor";
 
 fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event {
@@ -191,6 +191,7 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<Event> {
         resolved_at: row.get(17)?,
         quarantine_id: row.get(18)?,
         uid: row.get(19)?,
+        actor: row.get(20)?,
     })
 }
 
@@ -236,6 +237,7 @@ impl Store {
         conn.execute_batch(SCHEMA)?;
         // Columns added after the first release.
         add_column(&conn, "events", "uid", "INTEGER")?;
+        add_column(&conn, "events", "actor", "TEXT")?;
         add_column(&conn, "quarantine", "uid", "INTEGER")?;
         add_column(&conn, "quarantine", "gid", "INTEGER")?;
         Ok(Store { conn })
@@ -393,6 +395,15 @@ impl Store {
                 encode_findings(e.findings),
                 e.added_lines.join("\n")
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Note which program made the change an event describes.
+    pub fn set_actor(&self, id: i64, actor: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE events SET actor = ?2 WHERE id = ?1",
+            params![id, actor],
         )?;
         Ok(())
     }

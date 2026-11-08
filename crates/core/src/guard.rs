@@ -482,8 +482,11 @@ impl Guard {
             bail!(DecisionError::CannotRestore(ev.path.clone()));
         }
 
-        if ev.kind == Kind::TempExec && fs::symlink_metadata(&ev.path).is_err() {
-            // The program deleted itself; the caller ended its processes.
+        // The program deleted itself, or ran from memory (/proc/<pid>/exe): there is no file to
+        // keep, and the caller ended its processes.
+        if ev.kind == Kind::TempExec
+            && (fs::symlink_metadata(&ev.path).is_err() || ev.path.starts_with("/proc/"))
+        {
             self.store.resolve_event(ev.id, Status::Removed, None)?;
             return Ok(Outcome::Removed {
                 quarantine_id: None,

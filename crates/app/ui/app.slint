@@ -23,6 +23,7 @@ export struct EventDetail {
     findings: [string],
     lines: [string],
     lines-title: string,
+    actor: string,
 }
 
 export struct QuarantineRow {
@@ -47,6 +48,7 @@ export struct StatusInfo {
     admin: bool,
     exec-watch: bool,
     blocking: bool,
+    ebpf: bool,
     yara-rules: int,
     known-hashes: int,
     hash-updates: bool,
@@ -178,6 +180,10 @@ component EventView inherits VerticalLayout {
             text: detail.kind + " · " + detail.row.when + " · " + detail.row.status;
             font-size: 11px;
             color: Palette.foreground.transparentize(0.35);
+        }
+        if detail.actor != "": Text {
+            text: "✎ " + detail.actor;
+            wrap: word-wrap;
         }
         if detail.findings.length > 0: VerticalLayout {
             spacing: 4px;
@@ -355,6 +361,11 @@ export component AppWindow inherits Window {
                                     ok: status.exec-watch;
                                     label: @tr("Programs from temporary folders");
                                     value: !status.exec-watch ? @tr("not watched") : status.blocking ? @tr("watched, known malware is blocked") : @tr("watched, reported after the start");
+                                }
+                                StatusLine {
+                                    ok: status.ebpf;
+                                    label: @tr("Scripts, memory programs, who changed what");
+                                    value: status.ebpf ? @tr("watched with eBPF") : @tr("not watched");
                                 }
                             }
                         }

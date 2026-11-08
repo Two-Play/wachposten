@@ -107,7 +107,8 @@ impl Agent {
     }
 
     fn rescan(&mut self) -> Result<()> {
-        let events = self.guard.rescan()?;
+        let mut events = self.guard.rescan()?;
+        self.attribute(&mut events);
         for ev in &events {
             log::info!(
                 "event {}: {} {} ({})",
@@ -183,6 +184,34 @@ impl Agent {
                 notify::info(tr("Fehler", "Error"), message, "dialog-error");
             }
             _ => {}
+        }
+    }
+
+    /// Ask the daemon which programs made these changes. Without a daemon nothing happens.
+    fn attribute(&self, events: &mut [Event]) {
+        let paths: Vec<String> = events
+            .iter()
+            .filter(|e| e.actor.is_none() && !e.path.starts_with("crontab:"))
+            .map(|e| e.path.clone())
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let Ok(Reply::Writers { writers }) = ipc::call(
+            &socket_path(),
+            &Request::WhoWrote {
+                paths: paths.clone(),
+            },
+        ) else {
+            return;
+        };
+        for (path, writer) in paths.iter().zip(writers) {
+            let Some(actor) = writer else { continue };
+            for ev in events.iter_mut().filter(|e| &e.path == path) {
+                if self.guard.store().set_actor(ev.id, &actor).is_ok() {
+                    ev.actor = Some(actor.clone());
+                }
+            }
         }
     }
 

@@ -106,6 +106,10 @@ pub fn rule_label(rule: &str) -> &'static str {
             "läuft aus dem Arbeitsspeicher-Ordner /dev/shm",
             "runs from the memory folder /dev/shm",
         ),
+        "memfd" => tr(
+            "läuft direkt aus dem Arbeitsspeicher (memfd), ohne Datei",
+            "runs straight from memory (memfd), without a file",
+        ),
         "masquerade" => tr(
             "tarnt sich mit dem Namen eines Systemprozesses",
             "poses as a system process by name",

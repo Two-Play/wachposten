@@ -2,9 +2,11 @@
 """Tests the root daemon in a real Fedora VM: fanotify, blocking, system persistence, rpm checks
 and permissions. Needs no root on the host: QEMU with user networking, KVM and a cache folder.
 
-Usage: test/vm.py [--keep]
+Usage: test/vm.py [--keep] [--rpm]
+--rpm installs target/rpm/RPMS/*/wachposten-*.rpm (packaging/build-rpm.sh) instead of binaries.
 The Fedora Cloud image is downloaded once to ~/.cache/wachposten-vm (or $VM_CACHE).
 """
+import glob
 import hashlib
 import json
 import os
@@ -147,9 +149,14 @@ def wait_for(fn, timeout=20):
 
 def main():
     keep = "--keep" in sys.argv
-    print("building release binaries", flush=True)
-    subprocess.run(["cargo", "build", "--release", "-q", "-p", "wachposten-daemon", "-p", "wachposten"],
-                   cwd=ROOT, check=True)
+    use_rpm = "--rpm" in sys.argv
+    rpms = sorted(glob.glob(f"{ROOT}/target/rpm/RPMS/*/wachposten-[0-9]*.rpm"))
+    if use_rpm and not rpms:
+        sys.exit("no RPM found; run packaging/build-rpm.sh first")
+    if not use_rpm:
+        print("building release binaries", flush=True)
+        subprocess.run(["cargo", "build", "--release", "-q", "-p", "wachposten-daemon", "-p", "wachposten"],
+                       cwd=ROOT, check=True)
     work = tempfile.mkdtemp(prefix="wachposten-vm-", dir=os.path.expanduser("~/.cache"))
     vm = VM(work, cloud_image())
     try:
@@ -157,10 +164,24 @@ def main():
         if not vm.wait():
             print(open(f"{work}/serial.log", errors="replace").read()[-3000:])
             sys.exit("VM did not come up")
-        for name in ["wachposten-daemon", "wachposten"]:
-            vm.copy(f"{ROOT}/target/release/{name}", f"/tmp/{name}")
-        vm.copy(f"{ROOT}/packaging/systemd/wachposten-daemon.service", "/tmp/wachposten-daemon.service")
-        r = vm.sh("""set -e
+        if use_rpm:
+            vm.copy(rpms[-1], "/tmp/wachposten.rpm")
+            r = vm.sh("""set -e
+dnf -y -q install /tmp/wachposten.rpm
+systemctl enable --now wachposten-daemon
+sleep 4
+findmnt -no FSTYPE /tmp; findmnt -no FSTYPE /dev/shm
+""", timeout=900)
+            check("RPM installed and daemon started", r.returncode == 0, r.stdout[-500:] + r.stderr[-500:])
+            r2 = vm.sh("rpm -V wachposten && echo verified; ls /etc/xdg/autostart/wachposten-agent.desktop")
+            check("RPM files verify", "verified" in r2.stdout, r2.stdout + r2.stderr)
+        else:
+            for name in ["wachposten-daemon", "wachposten"]:
+                vm.copy(f"{ROOT}/target/release/{name}", f"/tmp/{name}")
+            vm.copy(f"{ROOT}/packaging/systemd/wachposten-daemon.service", "/tmp/wachposten-daemon.service")
+            # The CLI links fontconfig through Slint; the RPM pulls it in as a dependency.
+            r = vm.sh("""set -e
+rpm -q fontconfig >/dev/null || dnf -y -q install fontconfig
 install -m755 /tmp/wachposten-daemon /tmp/wachposten /usr/local/bin/
 install -m644 /tmp/wachposten-daemon.service /etc/systemd/system/
 rm -f /tmp/wachposten-daemon /tmp/wachposten /tmp/wachposten-daemon.service
@@ -170,7 +191,7 @@ systemctl enable --now wachposten-daemon
 sleep 4
 findmnt -no FSTYPE /tmp; findmnt -no FSTYPE /dev/shm
 """)
-        check("daemon installed and started", r.returncode == 0, r.stderr)
+            check("daemon installed and started", r.returncode == 0, r.stderr)
         print("   /tmp and /dev/shm:", " ".join(r.stdout.split()), flush=True)
 
         print("status", flush=True)
@@ -280,6 +301,50 @@ systemctl enable evil.service""")
                 r = vm.as_user("fedora", f"wachposten --system restore {qid}")
                 st = vm.sh("stat -c '%U %a' /var/spool/cron/gast").stdout.strip()
                 check("restored crontab keeps its owner", r.returncode == 0 and st == "gast 600", f"{st} {r.stderr}")
+
+        print("eBPF: scripts, memory programs, writers", flush=True)
+        r = vm.as_user("fedora", "wachposten --system status")
+        check("status: eBPF on", "scripts, memory programs and writers watched" in r.stdout, r.stdout + r.stderr)
+        vm.as_user("gast", "mkdir -p /tmp/.y && printf 'echo hi\\n' > /tmp/.y/inst.sh && sh /tmp/.y/inst.sh")
+        ev = wait_for(lambda: find(events(vm, "gast"), "/tmp/.y/inst.sh", "open"))
+        check("script run through sh from a hidden folder raises a question", ev and ev["severity"] == "suspicious", ev)
+        if ev:
+            r = vm.as_user("gast", f"wachposten --system show {ev['id']}")
+            check("the event names the interpreter", "Through interpreter: sh" in r.stdout, r.stdout)
+        vm.as_user("gast", f"printf 'print(\"{TEST_SIGNATURE}\")\\n' > /tmp/evil.py && python3 /tmp/evil.py")
+        ev = wait_for(lambda: find(events(vm, "gast"), "/tmp/evil.py", "open"))
+        check("malicious python script is reported", ev and ev["severity"] == "malicious", ev)
+        vm.as_user("gast", """nohup python3 -c 'import os; fd=os.memfd_create("kw"); os.write(fd, open("/usr/bin/sleep","rb").read()); os.execv("/proc/self/fd/%d" % fd, ["kw", "300"])' >/dev/null 2>&1 &""")
+        mem = wait_for(lambda: next((e for e in events(vm, "gast")
+                                     if re.match(r"/proc/\d+/exe$", e["path"]) and e["status"] == "open"), None))
+        check("program started from memory raises a question", mem and mem["severity"] == "suspicious", mem)
+        if mem:
+            pid = re.match(r"/proc/(\d+)/exe", mem["path"]).group(1)
+            r = vm.as_user("gast", f"wachposten --system remove {mem['id']}")
+            alive = vm.sh(f"kill -0 {pid} 2>/dev/null && echo alive || echo gone").stdout.strip()
+            check("removing it ends the process", r.returncode == 0 and alive == "gone", r.stdout + r.stderr + alive)
+
+        vm.sh("""python3 -c "open('/etc/cron.d/backdoor','w').write('* * * * * root /tmp/x\\n')" """)
+        ev = wait_for(lambda: find(events(vm, "fedora"), "/etc/cron.d/backdoor", "open"))
+        check("cron.d entry raises a question", ev is not None, ev)
+        if ev:
+            r = vm.as_user("fedora", f"wachposten --system show {ev['id']}")
+            check("the event names the writing program", "changed by: python3" in r.stdout, r.stdout)
+        vm.as_user("gast", """mkdir -p ~/.config/autostart && python3 -c "import os; open(os.path.expanduser('~/.config/autostart/x.desktop'),'w').write('[Desktop Entry]\\n')" """)
+        time.sleep(2)
+        who = """import json,socket,sys
+s=socket.socket(socket.AF_UNIX); s.connect("/run/wachposten/daemon.sock")
+s.sendall((json.dumps({"request":"who-wrote","paths":sys.argv[1:]})+"\\n").encode())
+print(s.makefile().readline())"""
+        vm.sh(f"cat > /usr/local/bin/wp-who.py <<'EOF'\n{who}\nEOF\nchmod 755 /usr/local/bin/wp-who.py")
+        r = vm.as_user("gast", "python3 /usr/local/bin/wp-who.py /home/gast/.config/autostart/x.desktop /etc/cron.d/backdoor")
+        try:
+            writers = json.loads(r.stdout)["writers"]
+        except (ValueError, KeyError):
+            writers = []
+        check("agent may ask who wrote its own files", len(writers) == 2 and writers[0] and "python3" in writers[0],
+              r.stdout + r.stderr)
+        check("but not about system files", len(writers) == 2 and writers[1] is None, r.stdout)
 
         print("package changes are not questioned", flush=True)
         r = vm.sh("dnf -y -q install --allowerasing vim-default-editor 2>&1 | tail -3; ls /etc/profile.d/ | grep -i editor",

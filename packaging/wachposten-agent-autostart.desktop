@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Wachposten agent
+Name[de]=Wachposten-Agent
+Comment=Asks about new autostart entries, services and malware
+Comment[de]=Fragt bei neuen Autostart-Einträgen, Diensten und Schadsoftware nach
+Exec=wachposten-agent
+Icon=wachposten
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-phase=2

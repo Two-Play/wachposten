@@ -171,6 +171,9 @@ fn show_event(home: &Path, ev: &Event) {
     if let Some(q) = ev.quarantine_id {
         println!("  quarantine: {q}");
     }
+    if let Some(actor) = &ev.actor {
+        println!("  changed by: {actor}");
+    }
     match &ev.new_entry {
         Some(Entry::Symlink { target, .. }) => println!("  link to:  {target}"),
         Some(Entry::File {
@@ -287,6 +290,7 @@ fn system_cmd(command: Command) -> Result<()> {
                 yara_rules,
                 known_hashes,
                 clamav,
+                ebpf,
             } = daemon(&Request::Status)?
             {
                 println!("daemon:         running");
@@ -309,6 +313,14 @@ fn system_cmd(command: Command) -> Result<()> {
                 println!(
                     "ClamAV:         {}",
                     if clamav { "in use" } else { "not available" }
+                );
+                println!(
+                    "eBPF:           {}",
+                    if ebpf {
+                        "scripts, memory programs and writers watched"
+                    } else {
+                        "off"
+                    }
                 );
             }
         }
