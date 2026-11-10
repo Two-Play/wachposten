@@ -157,7 +157,9 @@ def main():
         print("building release binaries", flush=True)
         subprocess.run(["cargo", "build", "--release", "-q", "-p", "wachposten-daemon", "-p", "wachposten"],
                        cwd=ROOT, check=True)
-    work = tempfile.mkdtemp(prefix="wachposten-vm-", dir=os.path.expanduser("~/.cache"))
+    parent = os.path.expanduser("~/.cache")
+    os.makedirs(parent, exist_ok=True)
+    work = tempfile.mkdtemp(prefix="wachposten-vm-", dir=parent)
     vm = VM(work, cloud_image())
     try:
         print("booting", flush=True)
