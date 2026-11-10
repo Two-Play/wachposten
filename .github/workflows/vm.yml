@@ -1,0 +1,61 @@
+name: VM tests
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      # A clean Fedora also proves that the spec file lists every build dependency.
+      - name: Build the RPM in Fedora 44
+        run: |
+          docker run --rm -v "$PWD":/src -w /src registry.fedoraproject.org/fedora:44 sh -ec '
+            dnf -y -q install rpm-build git dnf5-plugins
+            dnf -y -q builddep packaging/wachposten.spec
+            git config --global --add safe.directory /src
+            packaging/build-rpm.sh
+            chown -R '"$(id -u):$(id -g)"' target'
+      - run: sudo apt-get update -q && sudo apt-get install -y -q qemu-system-x86 qemu-utils xorriso
+      # Fails here, visibly, if a runner has no KVM.
+      - name: Open KVM to the runner user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sleep 2
+          test -w /dev/kvm
+      - id: week
+        run: echo "week=$(date +%G-%V)" >>"$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/wachposten-vm
+          key: vm-image-${{ steps.week.outputs.week }}
+      - run: python3 test/vm.py --rpm
+
+  vm-ok:
+    if: always()
+    needs: [vm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          VM: ${{ needs.vm.result }}
+        run: test "$VM" = success

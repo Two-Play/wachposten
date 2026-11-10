@@ -3,6 +3,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Guard against malware settling in on Linux desktops
 License:        GPL-3.0-or-later
+URL:            https://github.com/Two-Play/wachposten
 Source0:        %{name}-%{version}.tar.gz
 
 ExclusiveArch:  x86_64 aarch64
@@ -11,6 +12,8 @@ BuildRequires:  rust >= 1.89
 BuildRequires:  clang
 BuildRequires:  gcc
 BuildRequires:  kernel-headers
+BuildRequires:  pkgconfig(fontconfig)
+BuildRequires:  pkgconfig(xkbcommon)
 BuildRequires:  systemd-rpm-macros
 Requires:       cronie
 Recommends:     clamd
