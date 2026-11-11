@@ -49,7 +49,7 @@ jobs:
       - name: Build and install the package in Arch Linux
         run: |
           docker run --rm -v "$PWD":/src -w /src archlinux:latest sh -ec '
-            pacman -Syu --noconfirm --needed base-devel cargo clang pkgconf fontconfig libxkbcommon cronie git >/dev/null
+            pacman -Syu --noconfirm --needed base-devel cargo clang lld pkgconf fontconfig libxkbcommon cronie git >/dev/null
             useradd -m builder
             chown -R builder /src
             su builder -c "cd /src/packaging/arch && makepkg --nocheck --noconfirm"
