@@ -72,10 +72,7 @@ fn status_label(status: Status) -> &'static str {
         Status::Removed => tr("entfernt", "removed"),
         Status::Reverted => tr("rückgängig gemacht", "undone"),
         Status::Accepted => tr("aufgezeichnet", "recorded"),
-        Status::Noted => tr(
-            "unbedenklich, noch rückgängig zu machen",
-            "harmless, can still be undone",
-        ),
+        Status::Noted => tr("übernommen", "accepted"),
     }
 }
 
@@ -97,6 +94,18 @@ fn row(state: &State, item: &Item) -> EventRow {
         title: i18n::event_title(ev).into(),
         path: pretty(&state.home, &ev.path, item.system).into(),
         severity: ev.severity.as_str().into(),
+        level: if ev.wants_popup() {
+            "danger"
+        } else if ev.status == Status::Open {
+            "warning"
+        } else if ev.status == Status::Noted {
+            "hint"
+        } else {
+            "done"
+        }
+        .into(),
+        kind: i18n::kind_label(ev.kind).into(),
+        ransomware: ev.kind == wachposten_core::Kind::Ransomware,
         status: status_label(ev.status).into(),
         when: when(ev.updated_at).into(),
         can_decide: item.can_decide,
@@ -161,9 +170,21 @@ fn detail(state: &State, item: Option<&Item>) -> EventDetail {
     }
 }
 
+/// Dangerous events first, then waiting ones, each newest first.
+fn order_key(i: &Item) -> (u8, std::cmp::Reverse<(i64, i64)>) {
+    let rank = if i.event.wants_popup() {
+        0
+    } else if i.event.status == Status::Open {
+        1
+    } else {
+        2
+    };
+    (rank, std::cmp::Reverse((i.event.updated_at, i.event.id)))
+}
+
 fn sorted_rows(state: &State, items: &HashMap<(bool, i64), Item>) -> ModelRc<EventRow> {
     let mut v: Vec<&Item> = items.values().collect();
-    v.sort_by_key(|i| std::cmp::Reverse((i.event.updated_at, i.event.id)));
+    v.sort_by_key(|i| order_key(i));
     ModelRc::new(VecModel::from(
         v.into_iter().map(|i| row(state, i)).collect::<Vec<_>>(),
     ))
@@ -275,18 +296,42 @@ fn load(state: &mut State, ui: &AppWindow) -> Result<()> {
         clamav: state.local_clamav || sys_clam,
         baseline: state.guard.store().baseline_count()? as i32,
         open: state.open.len() as i32,
+        danger: state
+            .open
+            .values()
+            .filter(|i| i.event.wants_popup())
+            .count() as i32,
     });
 
-    // Without a choice, or when the chosen alert was handled, show the newest one.
+    // Without a choice, or when the chosen entry is gone, show the first one of the list.
     if state.open_pick.is_none_or(|k| !state.open.contains_key(&k)) {
         state.open_pick = state
             .open
             .values()
-            .max_by_key(|i| (i.event.updated_at, i.event.id))
+            .min_by_key(|i| order_key(i))
+            .map(|i| (i.system, i.event.id));
+    }
+    if state
+        .history_pick
+        .is_none_or(|k| !state.history.contains_key(&k))
+    {
+        state.history_pick = state
+            .history
+            .values()
+            .min_by_key(|i| std::cmp::Reverse((i.event.updated_at, i.event.id)))
             .map(|i| (i.system, i.event.id));
     }
     ui.set_open_rows(sorted_rows(state, &state.open));
     ui.set_history_rows(sorted_rows(state, &state.history));
+    let mut recent: Vec<&Item> = state.history.values().collect();
+    recent.sort_by_key(|i| std::cmp::Reverse((i.event.updated_at, i.event.id)));
+    ui.set_recent_rows(ModelRc::new(VecModel::from(
+        recent
+            .into_iter()
+            .take(5)
+            .map(|i| row(state, i))
+            .collect::<Vec<_>>(),
+    )));
     let open_pick = state.open_pick.and_then(|k| state.open.get(&k));
     ui.set_open_detail(detail(state, open_pick));
     let history_pick = state.history_pick.and_then(|k| state.history.get(&k));
@@ -440,11 +485,17 @@ fn daemon_raw(request: &Request) -> Option<Reply> {
     ipc::call(&socket(), request).ok()
 }
 
-pub fn run(tab: Option<&str>) -> Result<()> {
+pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<()> {
     let config = Config::from_env()?;
     let home = config.home.clone();
     let guard = Guard::open(config)?;
+    let offscreen = screenshot
+        .map(|_| crate::shot::install(1000, 680))
+        .transpose()?;
     let ui = AppWindow::new()?;
+    if offscreen.is_some() {
+        ui.set_force_dark(dark);
+    }
     if i18n::lang() == Lang::De {
         let _ = slint::select_bundled_translation("de");
     }
@@ -687,6 +738,10 @@ pub fn run(tab: Option<&str>) -> Result<()> {
         });
     }
 
+    if let (Some(window), Some(path)) = (offscreen, screenshot) {
+        ui.show()?;
+        return crate::shot::save(&window, path);
+    }
     let timer = Timer::default();
     timer.start(TimerMode::Repeated, Duration::from_secs(5), refresh);
     ui.run()?;

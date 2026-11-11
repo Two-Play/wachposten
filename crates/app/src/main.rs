@@ -33,6 +33,12 @@ enum Command {
         /// Page to show first.
         #[arg(long, value_parser = ["overview", "alerts", "history", "quarantine", "allowed", "settings"])]
         tab: Option<String>,
+        /// Render the window into this image instead of showing it.
+        #[arg(long, hide = true)]
+        screenshot: Option<PathBuf>,
+        /// With --screenshot: use the dark colour scheme.
+        #[arg(long, hide = true)]
+        dark: bool,
     },
     /// Show whether the agent runs and how many entries and events there are.
     Status,
@@ -255,6 +261,7 @@ fn config_cmd(config: &Config, action: Option<ConfigAction>) -> Result<()> {
 }
 
 mod gui;
+mod shot;
 
 fn has_display() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
@@ -414,7 +421,7 @@ fn print_quarantine(home: &Path, items: &[wachposten_core::QuarantineItem]) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.command.is_none() && !cli.system && has_display() {
-        return gui::run(None);
+        return gui::run(None, None, false);
     }
     if cli.system {
         return system_cmd(cli.command.unwrap_or(Command::Status));
@@ -424,7 +431,11 @@ fn main() -> Result<()> {
     let home = config.home.clone();
 
     match cli.command.unwrap_or(Command::Status) {
-        Command::Window { tab } => return gui::run(tab.as_deref()),
+        Command::Window {
+            tab,
+            screenshot,
+            dark,
+        } => return gui::run(tab.as_deref(), screenshot.as_deref(), dark),
         Command::Status => {
             let open = guard.store().open_events()?;
             println!(
