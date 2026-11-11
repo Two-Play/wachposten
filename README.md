@@ -350,6 +350,18 @@ The workspace has `crates/core` (baseline, analysis, decisions, settings, IPC, S
 daemon as a systemd service (or the RPM with `--rpm`) and checks blocking, program start
 reports, system persistence, rpm checks, eBPF and permissions with a second, non-admin user.
 
+`test/desktop-vm.py` is for trying it by hand: it builds a Fedora KDE Plasma VM once (about
+2 GB download, 15-20 minutes) with the newest RPM from `packaging/build-rpm.sh`, a German
+desktop, a user `anna` who is logged in automatically (password `wachposten` for sudo) and test
+scripts in `~/Tests` (autostart entries, a blocked test "malware", normal mass changes, a
+ransomware simulation, a decoy change). Later runs open the VM window right away and keep what
+happened inside; `--update` puts a newly built RPM in, `--reset` starts over.
+
+```bash
+packaging/build-rpm.sh
+test/desktop-vm.py
+```
+
 `yara-x` 1.23 does not build with the newest `rsa` release candidate, so `Cargo.lock` pins
 `rsa` to `0.10.0-rc.19`. Keep that pin when running `cargo update`.
 
