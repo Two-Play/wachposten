@@ -7,7 +7,6 @@
 //! one `gpg` or `openssl` per file is caught through the script.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -173,7 +172,17 @@ pub fn verdict(name: &str, head: &[u8]) -> Option<bool> {
 }
 
 fn read_head(path: &Path) -> Option<Vec<u8>> {
-    let mut f = File::open(path).ok()?;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Paths come from the processes being watched: never follow a link, never wait on a FIFO
+    // or device, and only read regular files.
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut buf = vec![0; 4096];
     let mut n = 0;
     while n < buf.len() {
@@ -242,6 +251,7 @@ const O_WRONLY: u32 = 0o1;
 const O_RDWR: u32 = 0o2;
 const O_CREAT: u32 = 0o100;
 const O_TRUNC: u32 = 0o1000;
+const O_EXCL: u32 = libc::O_EXCL as u32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
@@ -399,7 +409,10 @@ impl Detector {
     ) -> Option<Alarm> {
         let decoy = match op {
             Op::Rename { from } => is_decoy(path) || from.as_deref().is_some_and(is_decoy),
-            Op::Write { flags } => is_decoy(path) && flags & (O_TRUNC | O_WRONLY | O_RDWR) != 0,
+            // Creating one with O_EXCL (how the agent does it) cannot change an existing file.
+            Op::Write { flags } => {
+                is_decoy(path) && flags & (O_TRUNC | O_WRONLY | O_RDWR) != 0 && flags & O_EXCL == 0
+            }
             Op::Unlink => is_decoy(path),
         };
         if decoy {
@@ -758,9 +771,14 @@ mod tests {
         assert_eq!(a.reason, Reason::Decoy(p.clone()));
         let a = d.observe(4, None, &p, &Op::Unlink, now).unwrap();
         assert_eq!(a.pid, 4);
-        // Reading or creating it is fine.
+        // Reading it, or creating it exclusively as the agent does, is fine.
         assert!(
             d.observe(5, None, &p, &Op::Write { flags: 0 }, now)
+                .is_none()
+        );
+        let create = O_WRONLY | O_CREAT | O_EXCL;
+        assert!(
+            d.observe(6, None, &p, &Op::Write { flags: create }, now)
                 .is_none()
         );
     }

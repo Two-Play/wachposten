@@ -460,6 +460,29 @@ print(20000)' && rm -rf ~/last""", timeout=600)
         alarms = vm.sh("journalctl -u wachposten-daemon --no-pager | grep -c 'ransomware check: process' || true").stdout.strip()
         check("the copy raised no alarm (only the attack and the decoy did)", alarms == "2", alarms + r.stdout[-500:])
 
+        print("attacks on the daemon", flush=True)
+        # A folder in /tmp that links to /etc must not let a user aim root at /etc files.
+        vm.as_user("gast", "mkdir -p /tmp/.d && ln -sfn /etc /tmp/.d/e && bash /tmp/.d/e/hostname >/dev/null 2>&1; true")
+        time.sleep(3)
+        rows = events(vm, "gast", all_=True)
+        check("a script path through a linked folder is not taken for a /tmp script",
+              not [e for e in rows if "/tmp/.d/e" in e["path"] or e["path"] == "/etc/hostname"], rows[:5])
+        flood = """import socket, time
+socks = []
+for _ in range(60):
+    try:
+        s = socket.socket(socket.AF_UNIX); s.connect("/run/wachposten/daemon.sock"); socks.append(s)
+    except OSError:
+        pass
+time.sleep(20)
+"""
+        vm.sh(f"cat > /usr/local/bin/wp-flood.py <<'EOF'\n{flood}EOF")
+        vm.as_user("gast", "nohup python3 /usr/local/bin/wp-flood.py >/dev/null 2>&1 &")
+        time.sleep(3)
+        r = vm.as_user("fedora", "wachposten --system status")
+        check("a user holding many connections does not lock others out", r.returncode == 0 and "daemon:" in r.stdout,
+              r.stdout + r.stderr)
+
         print("package changes are not questioned", flush=True)
         r = vm.sh("dnf -y -q install --allowerasing vim-default-editor 2>&1 | tail -3; ls /etc/profile.d/ | grep -i editor",
                   timeout=900)

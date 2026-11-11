@@ -81,6 +81,42 @@ fn can_see(ev: &Event, uid: u32, admin: bool) -> bool {
     admin || ev.uid.is_none() || ev.uid == Some(uid)
 }
 
+/// A non-admin decides only on a file that really is theirs: no symbolic link on the way, and
+/// owned by them. Programs from memory (`/proc/<pid>/exe`) are judged by the event's user.
+fn owns_program_file(path: &str, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if path.starts_with("/proc/") {
+        return true;
+    }
+    let p = Path::new(path);
+    match std::fs::symlink_metadata(p) {
+        // Already gone (it deleted itself): nothing will be touched on disk.
+        Err(_) => true,
+        Ok(m) => {
+            m.file_type().is_file()
+                && m.uid() == uid
+                && std::fs::canonicalize(p).is_ok_and(|real| real == p)
+        }
+    }
+}
+
+/// What a person sees of an event. Everybody learns that a system location changed, but only
+/// admins and the event's own user see what changed: added lines of a sudo rule or of another
+/// person's crontab, matched lines and the program behind it stay private.
+fn view(mut ev: Event, uid: u32, admin: bool) -> Event {
+    if !admin && ev.uid != Some(uid) {
+        ev.added_lines.clear();
+        ev.actor = None;
+        for f in &mut ev.findings {
+            f.line.clear();
+        }
+        if let Some(wachposten_core::Entry::File { content, .. }) = &mut ev.new_entry {
+            *content = None;
+        }
+    }
+    ev
+}
+
 fn can_decide(ev: &Event, uid: u32, admin: bool) -> bool {
     admin || (ev.kind.is_program() && ev.uid == Some(uid))
 }
@@ -110,7 +146,7 @@ impl Daemon {
                 return true;
             }
             c.send(&Reply::Event {
-                event: ev.clone(),
+                event: view(ev.clone(), c.uid, c.admin),
                 can_decide: can_decide(&ev, c.uid, c.admin),
             })
         });
@@ -205,8 +241,10 @@ impl Daemon {
         }
         let mut pids = vec![pid];
         if !target.starts_with("/proc") {
+            // Only processes of the same user: a match on another user's process is never
+            // reason enough to stop it.
             pids.extend(
-                proc::processes_of(&target)
+                proc::processes_of_user(&target, info.uid)
                     .into_iter()
                     .filter(|p| *p != pid),
             );
@@ -401,6 +439,11 @@ impl Daemon {
     }
 
     fn subscribe(&mut self, mut client: Client) {
+        let mine = self.clients.iter().filter(|c| c.uid == client.uid).count();
+        if mine >= server::MAX_SUBSCRIBERS_PER_USER {
+            log::warn!("too many subscriptions of uid {}", client.uid);
+            return;
+        }
         let hello = Reply::Hello {
             version: env!("CARGO_PKG_VERSION").into(),
             admin: client.admin,
@@ -412,7 +455,7 @@ impl Daemon {
             if can_see(&ev, client.uid, client.admin)
                 && !client.send(&Reply::Event {
                     can_decide: can_decide(&ev, client.uid, client.admin),
-                    event: ipc::strip(ev),
+                    event: view(ipc::strip(ev), client.uid, client.admin),
                 })
             {
                 return;
@@ -517,14 +560,14 @@ impl Daemon {
                     events: events
                         .into_iter()
                         .filter(|e| can_see(e, uid, admin))
-                        .map(ipc::strip)
+                        .map(|e| view(ipc::strip(e), uid, admin))
                         .collect(),
                 }
             }
             Request::Show { id } => match self.guard.store().event(id)? {
                 Some(ev) if can_see(&ev, uid, admin) => Reply::Event {
                     can_decide: can_decide(&ev, uid, admin),
-                    event: ipc::strip(ev),
+                    event: view(ipc::strip(ev), uid, admin),
                 },
                 _ => Reply::Error {
                     message: format!("event {id} does not exist"),
@@ -541,11 +584,16 @@ impl Daemon {
                         message: "only admins may decide on this".into(),
                     });
                 }
+                if !admin && !owns_program_file(&ev.path, uid) {
+                    return Ok(Reply::Error {
+                        message: "only admins may decide on files of other users".into(),
+                    });
+                }
                 let outcome = match decision {
                     Decision::Allow => {
                         let outcome = self.guard.allow(id, hash.as_deref())?;
                         if ev.kind == Kind::Ransomware {
-                            let pids = proc::processes_of(Path::new(&ev.path));
+                            let pids = proc::processes_of_user(Path::new(&ev.path), ev.uid);
                             let n = proc::signal_all(&pids, nix::sys::signal::Signal::SIGCONT);
                             log::info!("continued {n} processes of {}", ev.path);
                         }
@@ -553,7 +601,7 @@ impl Daemon {
                     }
                     Decision::Remove => {
                         if ev.kind == Kind::Ransomware {
-                            let pids = proc::processes_of(Path::new(&ev.path));
+                            let pids = proc::processes_of_user(Path::new(&ev.path), ev.uid);
                             let n = proc::signal_all(&pids, nix::sys::signal::Signal::SIGKILL);
                             log::info!("ended {n} processes of {}", ev.path);
                         } else if ev.kind == Kind::TempExec {

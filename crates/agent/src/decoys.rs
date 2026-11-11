@@ -96,7 +96,12 @@ fn apply_in(folders: &[PathBuf], mode: Decoys) -> Result<usize> {
             if doc.is_none() {
                 doc = Some(document()?);
             }
-            fs::write(&path, doc.as_ref().unwrap())?;
+            // Exclusive creation: the daemon knows that this cannot change an existing file.
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            f.write_all(doc.as_ref().unwrap())?;
         }
         n += 1;
     }

@@ -280,6 +280,30 @@ Data lives in `$XDG_DATA_HOME/wachposten` (`state.db`, `hashes.db`, `quarantine/
 `WACHPOSTEN_NO_CRONTAB=1` to switch crontab watching off. Messages are German when the locale
 starts with `de`, English otherwise.
 
+## Security of the daemon itself
+
+The daemon runs as root and listens to every local user, so it is built to be hard to turn
+against the system:
+
+- Callers are identified only by `SO_PEERCRED`. Non-admins decide only on their own program
+  starts and ransomware stops, and only on files that really are theirs (owned by them, no
+  symbolic link on the way). They see that a system location changed, but not what changed.
+- As root, Wachposten never deletes, overwrites or restores through a symbolic link in the
+  path, writes restored files through an exclusive, non-following temporary file, and judges
+  scripts by their real path, so a folder in `/tmp` that links to `/etc` cannot aim it at
+  `/etc/passwd`.
+- Stopping and ending processes is limited to processes of the same user. A script counts as
+  the culprit only if it belongs to that user; interpreters and system programs are never
+  quarantined or allowed as a whole. Session programs are recognised by their root-owned
+  program file, not by a name a process can choose.
+- One person's *Allow* applies to that person only.
+- Files sampled by the ransomware check are opened without following links and without
+  blocking, and only regular files are read.
+- At most 64 connections at once and 8 per user, short timeouts, at most 4 subscriptions per
+  user; the unit sets `UMask=0077`, `LimitNOFILE` and `TasksMax`.
+- Text from outside (paths, lines, process names) is escaped in notifications and stripped of
+  control characters in the terminal.
+
 ## Limits
 
 - The agent runs as the user. Malware running as the same user can stop it or change its

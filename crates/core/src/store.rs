@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS events (
     quarantine_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS events_open ON events (status, path);
+CREATE TABLE IF NOT EXISTS allowlist_user (
+    hash TEXT NOT NULL,
+    uid INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (hash, uid)
+);
 CREATE TABLE IF NOT EXISTS allowlist (
     hash TEXT PRIMARY KEY,
     path TEXT NOT NULL,
@@ -74,6 +81,9 @@ pub struct AllowedFile {
     pub hash: String,
     pub path: String,
     pub added_at: i64,
+    /// Allowed for this user only (the daemon); `None` for everybody.
+    #[serde(default)]
+    pub uid: Option<u32>,
 }
 
 pub struct Store {
@@ -539,19 +549,49 @@ impl Store {
         Ok(())
     }
 
+    /// Allow a file hash for one user only, so one person's decision does not hide the file
+    /// from everybody else.
+    pub fn allow_hash_for(&self, hash: &str, path: &str, uid: u32) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO allowlist_user (hash, uid, path, added_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![hash, uid, path, now()],
+        )?;
+        Ok(())
+    }
+
     /// Allowed file hashes with the path they were allowed for, newest first.
     pub fn allowlist(&self) -> rusqlite::Result<Vec<AllowedFile>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT hash, path, added_at FROM allowlist ORDER BY added_at DESC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT hash, path, added_at, NULL FROM allowlist
+             UNION ALL SELECT hash, path, added_at, uid FROM allowlist_user
+             ORDER BY added_at DESC",
+        )?;
         stmt.query_map([], |r| {
             Ok(AllowedFile {
                 hash: r.get(0)?,
                 path: r.get(1)?,
                 added_at: r.get(2)?,
+                uid: r.get(3)?,
             })
         })?
         .collect()
+    }
+
+    /// Whether `hash` is allowed for everybody or for `uid`.
+    pub fn is_allowed_for(&self, hash: &str, uid: Option<u32>) -> rusqlite::Result<bool> {
+        if self.is_allowed_hash(hash)? {
+            return Ok(true);
+        }
+        let Some(uid) = uid else { return Ok(false) };
+        self.conn
+            .query_row(
+                "SELECT 1 FROM allowlist_user WHERE hash = ?1 AND uid = ?2",
+                params![hash, uid],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
     }
 
     /// Forget an allowed hash; the file is reported again next time.
@@ -559,6 +599,9 @@ impl Store {
         Ok(self
             .conn
             .execute("DELETE FROM allowlist WHERE hash = ?1", [hash])?
+            + self
+                .conn
+                .execute("DELETE FROM allowlist_user WHERE hash = ?1", [hash])?
             > 0)
     }
 

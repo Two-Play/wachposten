@@ -198,7 +198,31 @@ pub fn export(guard: &Guard, format: &str) -> Result<String> {
     })
 }
 
+/// Replace control characters, so names chosen by a program cannot send escape sequences to
+/// the terminal (fake or hidden lines).
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
+/// An event with every text that came from outside made safe for the terminal.
+fn printable(ev: &Event) -> Event {
+    let mut ev = ev.clone();
+    ev.path = clean(&ev.path);
+    ev.actor = ev.actor.as_deref().map(clean);
+    ev.added_lines = ev.added_lines.iter().map(|l| clean(l)).collect();
+    for f in &mut ev.findings {
+        f.line = clean(&f.line);
+    }
+    if let Some(Entry::Symlink { target, .. }) = &mut ev.new_entry {
+        *target = clean(target);
+    }
+    ev
+}
+
 fn print_event_line(home: &Path, ev: &Event) {
+    let ev = &printable(ev);
     println!(
         "{:>5}  {}  {:<10} {:<9} {:<10} {}",
         ev.id,
@@ -219,7 +243,7 @@ fn show(guard: &Guard, id: i64) -> Result<()> {
 }
 
 fn show_event(home: &Path, ev: &Event) {
-    let ev = ev.clone();
+    let ev = printable(ev);
     println!("Event {}: {}", ev.id, i18n::event_title(&ev));
     println!("  {}", i18n::event_sentence(&ev));
     println!("  path:     {}", pretty(home, &ev.path));
@@ -560,11 +584,15 @@ fn main() -> Result<()> {
             let report = scan::scan_paths_skipping(&scanner, &paths, &skip, |path, detections| {
                 if detections.is_empty() {
                     if !notify {
-                        println!("clean     {}", path.display());
+                        println!("clean     {}", clean(&path.display().to_string()));
                     }
                 } else {
                     for d in detections {
-                        println!("MALWARE   {}  {}", path.display(), d.label());
+                        println!(
+                            "MALWARE   {}  {}",
+                            clean(&path.display().to_string()),
+                            d.label()
+                        );
                     }
                 }
             });
