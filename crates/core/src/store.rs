@@ -506,6 +506,11 @@ impl Store {
         self.query_events("WHERE status = 'open' ORDER BY id", [])
     }
 
+    /// Events created at or after `since` (Unix time), oldest first.
+    pub fn events_since(&self, since: i64) -> rusqlite::Result<Vec<Event>> {
+        self.query_events("WHERE created_at >= ?1 ORDER BY id", [since])
+    }
+
     pub fn recent_events(&self, limit: i64) -> rusqlite::Result<Vec<Event>> {
         self.query_events("ORDER BY id DESC LIMIT ?1", [limit])
     }

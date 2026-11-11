@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+MimeType=all/all;
+Actions=wachposten-scan;
+X-KDE-Priority=TopLevel
+
+[Desktop Action wachposten-scan]
+Name=Check with Wachposten
+Name[de]=Mit Wachposten prüfen
+Icon=wachposten
+Exec=wachposten scan-file --notify %F

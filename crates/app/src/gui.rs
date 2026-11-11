@@ -423,6 +423,7 @@ fn store_quarantine(state: &State, _system: bool) -> Result<Vec<(i64, Quarantine
 
 fn settings_data(settings: &Settings) -> SettingsData {
     SettingsData {
+        weekly: settings.weekly_report,
         decoys: match settings.decoys {
             Decoys::Off => 0,
             Decoys::Visible => 1,
@@ -666,6 +667,56 @@ pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<(
     {
         let state = state.clone();
         let weak = ui.as_weak();
+        ui.on_export_history(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let state = state.borrow();
+            let dir = wachposten_core::settings::xdg_download_dir(&state.home);
+            let name = format!(
+                "wachposten-{}-{}.csv",
+                tr("verlauf", "history"),
+                Local::now().format("%Y-%m-%d-%H%M")
+            );
+            let path = dir.join(name);
+            let result = crate::export(&state.guard, "csv")
+                .and_then(|text| Ok(std::fs::write(&path, text)?));
+            match result {
+                Ok(()) => show(
+                    &ui,
+                    format!("{}: {}", tr("Gespeichert", "Saved"), path.display()),
+                    false,
+                ),
+                Err(e) => show(&ui, format!("{e:#}"), true),
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_scan_home(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wachposten"));
+            match Command::new(exe)
+                .args(["scan-file", "--notify", "--home"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    std::thread::spawn(move || child.wait());
+                    show(
+                    &ui,
+                    tr(
+                        "Die Prüfung läuft im Hintergrund. Das Ergebnis kommt als Benachrichtigung.",
+                        "The check runs in the background. The result comes as a notification.",
+                    ),
+                    false,
+                    )
+                }
+                Err(e) => show(&ui, format!("{e:#}"), true),
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let weak = ui.as_weak();
         let refresh = refresh.clone();
         ui.on_check_now(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -708,6 +759,7 @@ pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<(
                 s.hashes.malwarebazaar_auth_key = (!key.is_empty()).then_some(key);
                 s.hashes.online_lookup = data.online;
                 s.clamav.enabled = data.clamav;
+                s.weekly_report = data.weekly;
                 s.decoys = match data.decoys {
                     1 => Decoys::Visible,
                     2 => Decoys::Hidden,

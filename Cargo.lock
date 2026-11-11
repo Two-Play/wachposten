@@ -6574,8 +6574,10 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "notify-rust",
  "slint",
  "slint-build",
+ "tempfile",
  "toml",
  "wachposten-core",
  "wachposten-scan",
@@ -6602,6 +6604,7 @@ name = "wachposten-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "hex",
  "log",
  "regex",

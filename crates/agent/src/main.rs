@@ -80,9 +80,37 @@ struct Agent {
     remote: BTreeMap<i64, (Event, bool)>,
     /// Daemon events already shown, by id and state, so a reconnect does not repeat them.
     remote_seen: HashSet<(i64, String)>,
+    weekly_report: bool,
 }
 
+const WEEK: i64 = 7 * 86400;
+const LAST_REPORT: &str = "last_weekly_report";
+
 impl Agent {
+    /// Once a week, a short summary of what happened. The first week starts with the agent.
+    fn weekly_report(&self) -> Result<()> {
+        if !self.weekly_report {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let store = self.guard.store();
+        let Some(last) = store.meta(LAST_REPORT)?.and_then(|v| v.parse::<i64>().ok()) else {
+            store.set_meta(LAST_REPORT, &now.to_string())?;
+            return Ok(());
+        };
+        if now - last < WEEK {
+            return Ok(());
+        }
+        let mut summary = wachposten_core::report::Summary::of(&store.events_since(last)?);
+        summary.open += self.remote.len();
+        let (title, text) = summary.weekly_text();
+        notify::info(&title, &text, "security-high");
+        store.set_meta(LAST_REPORT, &now.to_string())?;
+        Ok(())
+    }
+
     /// Tell the person about new or changed events, as loud as each one deserves.
     fn ask(&self, events: &[Event]) {
         for ev in events {
@@ -410,6 +438,7 @@ fn main() -> Result<()> {
         watch,
         remote: BTreeMap::new(),
         remote_seen: HashSet::new(),
+        weekly_report: settings.weekly_report,
     };
     // Changes made while the agent was not running.
     let offline = agent.guard.rescan()?;
@@ -422,7 +451,8 @@ fn main() -> Result<()> {
 
     for msg in rx {
         let result = match msg {
-            Msg::Changed | Msg::Tick | Msg::Rescan => agent.rescan(),
+            Msg::Tick => agent.weekly_report().and_then(|()| agent.rescan()),
+            Msg::Changed | Msg::Rescan => agent.rescan(),
             Msg::ShowOpen => agent.show_open(),
             Msg::OpenWindow => {
                 let alerts =
