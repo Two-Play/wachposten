@@ -29,6 +29,11 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Files the daemon creates are private unless it sets a mode on purpose.
+UMask=0077
+# Room for many watched folders and clients; the socket limits clients per user itself.
+LimitNOFILE=16384
+TasksMax=512
 # Deliberately not set: PrivateTmp, PrivateDevices, ProtectHome and ProtectSystem. The daemon has
 # to see the real /tmp, /dev/shm and home folders and must be able to restore files in /etc.
 # MemoryDenyWriteExecute is not set because YARA-X compiles rules to machine code.

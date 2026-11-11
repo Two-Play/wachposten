@@ -259,7 +259,10 @@ pub fn script_in_temp(ev: &RawEvent, program: &Path) -> Option<PathBuf> {
             continue;
         }
         let path = resolve(arg, ev.pid, AT_FDCWD)?;
-        return (temp_root(&path).is_some() && path.is_file()).then_some(path);
+        // Judge the real file: a folder in /tmp may be a link to /etc, and root must never
+        // take /etc/passwd for a script in /tmp.
+        let real = fs::canonicalize(&path).ok()?;
+        return (temp_root(&real).is_some() && real.is_file()).then_some(real);
     }
     None
 }
@@ -295,10 +298,11 @@ impl Parents {
     }
 }
 
-/// The decoy files belong to the agent, which may create and remove them.
+/// The decoy files belong to the agent, which may remove them. Only an installed agent (a
+/// program owned by root) counts: malware could simply call itself wachposten-agent.
 fn is_agent(pid: u32) -> bool {
-    fs::read_link(format!("/proc/{pid}/exe"))
-        .is_ok_and(|e| e.file_name().is_some_and(|n| n == "wachposten-agent"))
+    proc::root_owned_exe(pid as i32)
+        .is_some_and(|e| e.file_name().is_some_and(|n| n == "wachposten-agent"))
 }
 
 /// Hand one write event to the ransomware check.

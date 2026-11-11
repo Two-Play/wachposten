@@ -99,7 +99,7 @@ pub fn kill_program(path: &Path) -> usize {
         .count()
 }
 
-/// Processes that keep the session alive; they are never stopped, only reported.
+/// Programs that keep the session alive; they are never stopped, only reported.
 const PROTECTED: &[&str] = &[
     "systemd",
     "plasmashell",
@@ -112,11 +112,24 @@ const PROTECTED: &[&str] = &[
     "dbus-broker",
     "sddm",
     "gdm",
-    "wachposten-agen",
+    "wachposten-agent",
 ];
 
+/// The program of a process, if it is a file owned by root (installed by a package, not by
+/// the user). A name alone proves nothing: any program may call itself "systemd".
+pub fn root_owned_exe(pid: i32) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let meta = fs::metadata(&exe).ok()?;
+    (meta.uid() == 0 && meta.mode() & 0o022 == 0).then_some(exe)
+}
+
 pub fn is_protected(pid: i32) -> bool {
-    pid <= 1 || comm(pid).is_some_and(|c| PROTECTED.contains(&c.as_str()))
+    pid <= 1
+        || root_owned_exe(pid).is_some_and(|exe| {
+            exe.file_name()
+                .is_some_and(|n| PROTECTED.contains(&n.to_string_lossy().as_ref()))
+        })
 }
 
 /// The arguments of a process.
@@ -162,12 +175,31 @@ pub fn target_of(pid: i32) -> std::path::PathBuf {
         if arg.starts_with('-') {
             continue;
         }
-        if let Some(script) = absolute(pid, arg).filter(|p| p.is_file()) {
+        // Only a real file of the process's own user counts; anything else (a link, a file of
+        // someone else such as /etc/shadow) would let a user aim root at foreign files.
+        let owner = info(pid).uid;
+        if let Some(script) = absolute(pid, arg)
+            .and_then(|p| fs::canonicalize(p).ok())
+            .filter(|p| {
+                fs::metadata(p).is_ok_and(|m| {
+                    use std::os::unix::fs::MetadataExt;
+                    m.is_file() && Some(m.uid()) == owner
+                })
+            })
+        {
             return script;
         }
         break;
     }
     own
+}
+
+/// Processes of user `uid` that run `target` as a program or as a script, see [`target_of`].
+pub fn processes_of_user(target: &Path, uid: Option<u32>) -> Vec<i32> {
+    processes_of(target)
+        .into_iter()
+        .filter(|p| uid.is_none() || info(*p).uid == uid)
+        .collect()
 }
 
 /// Processes that run `target` as a program or as a script, see [`target_of`].
