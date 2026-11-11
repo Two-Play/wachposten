@@ -1,0 +1,37 @@
+# Maintainer: Two-Play <https://github.com/Two-Play/wachposten>
+# Build from a checkout: cd packaging/arch && makepkg -si
+pkgname=wachposten
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Security guard for Linux desktops: persistence, program starts, ransomware, YARA-X"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Two-Play/wachposten"
+license=('GPL-3.0-or-later')
+depends=('glibc' 'fontconfig' 'libxkbcommon' 'cronie')
+makedepends=('cargo' 'clang' 'pkgconf')
+optdepends=('clamav: scan Windows files, Office documents and archives'
+            'python-nautilus: "Check with Wachposten" in GNOME Files'
+            'snapper: snapshots of /home against ransomware')
+backup=('etc/wachposten/daemon.toml' 'etc/xdg/autostart/wachposten-agent.desktop')
+
+_root() { cd "$startdir/../.."; }
+
+prepare() {
+    _root
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    _root
+    cargo build --release --frozen -p wachposten -p wachposten-agent -p wachposten-daemon
+}
+
+check() {
+    _root
+    cargo test --frozen
+}
+
+package() {
+    _root
+    packaging/install-tree.sh "$pkgdir"
+}

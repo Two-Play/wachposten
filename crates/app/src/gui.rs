@@ -65,6 +65,29 @@ fn when(ts: i64) -> String {
     )
 }
 
+/// Short time for lists: the time today, day and month this year, the date before.
+fn when_short(ts: i64) -> String {
+    let Some(t) = Local.timestamp_opt(ts, 0).single() else {
+        return ts.to_string();
+    };
+    let now = Local::now();
+    if t.date_naive() == now.date_naive() {
+        t.format("%H:%M").to_string()
+    } else if t.format("%Y").to_string() == now.format("%Y").to_string() {
+        t.format("%d.%m.").to_string()
+    } else {
+        t.format("%d.%m.%Y").to_string()
+    }
+}
+
+/// Labels are written for running text; at the start of a line they begin with a capital.
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
 fn status_label(status: Status) -> &'static str {
     match status {
         Status::Open => tr("offen", "open"),
@@ -104,10 +127,11 @@ fn row(state: &State, item: &Item) -> EventRow {
             "done"
         }
         .into(),
-        kind: i18n::kind_label(ev.kind).into(),
+        kind: capitalized(i18n::kind_label(ev.kind)).into(),
         ransomware: ev.kind == wachposten_core::Kind::Ransomware,
         status: status_label(ev.status).into(),
-        when: when(ev.updated_at).into(),
+        when: when_short(ev.updated_at).into(),
+        when_full: when(ev.updated_at).into(),
         can_decide: item.can_decide,
         open: ev.decidable(),
         noted: ev.status == Status::Noted,
@@ -151,7 +175,7 @@ fn detail(state: &State, item: Option<&Item>) -> EventDetail {
         valid: true,
         row: row(state, item),
         sentence: i18n::event_sentence(ev).into(),
-        kind: i18n::kind_label(ev.kind).into(),
+        kind: capitalized(i18n::kind_label(ev.kind)).into(),
         findings: strings(findings),
         lines: strings(lines),
         actor: ev
@@ -423,6 +447,7 @@ fn store_quarantine(state: &State, _system: bool) -> Result<Vec<(i64, Quarantine
 
 fn settings_data(settings: &Settings) -> SettingsData {
     SettingsData {
+        weekly: settings.weekly_report,
         decoys: match settings.decoys {
             Decoys::Off => 0,
             Decoys::Visible => 1,
@@ -490,7 +515,16 @@ pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<(
     let home = config.home.clone();
     let guard = Guard::open(config)?;
     let offscreen = screenshot
-        .map(|_| crate::shot::install(1000, 680))
+        .map(|_| {
+            let (w, h) = std::env::var("WACHPOSTEN_SHOT_SIZE")
+                .ok()
+                .and_then(|v| {
+                    let (w, h) = v.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                })
+                .unwrap_or((1000, 680));
+            crate::shot::install(w, h)
+        })
         .transpose()?;
     let ui = AppWindow::new()?;
     if offscreen.is_some() {
@@ -666,6 +700,56 @@ pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<(
     {
         let state = state.clone();
         let weak = ui.as_weak();
+        ui.on_export_history(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let state = state.borrow();
+            let dir = wachposten_core::settings::xdg_download_dir(&state.home);
+            let name = format!(
+                "wachposten-{}-{}.csv",
+                tr("verlauf", "history"),
+                Local::now().format("%Y-%m-%d-%H%M")
+            );
+            let path = dir.join(name);
+            let result = crate::export(&state.guard, "csv")
+                .and_then(|text| Ok(std::fs::write(&path, text)?));
+            match result {
+                Ok(()) => show(
+                    &ui,
+                    format!("{}: {}", tr("Gespeichert", "Saved"), path.display()),
+                    false,
+                ),
+                Err(e) => show(&ui, format!("{e:#}"), true),
+            }
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        ui.on_scan_home(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wachposten"));
+            match Command::new(exe)
+                .args(["scan-file", "--notify", "--home"])
+                .stdout(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => {
+                    std::thread::spawn(move || child.wait());
+                    show(
+                    &ui,
+                    tr(
+                        "Die Prüfung läuft im Hintergrund. Das Ergebnis kommt als Benachrichtigung.",
+                        "The check runs in the background. The result comes as a notification.",
+                    ),
+                    false,
+                    )
+                }
+                Err(e) => show(&ui, format!("{e:#}"), true),
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let weak = ui.as_weak();
         let refresh = refresh.clone();
         ui.on_check_now(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -708,6 +792,7 @@ pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<(
                 s.hashes.malwarebazaar_auth_key = (!key.is_empty()).then_some(key);
                 s.hashes.online_lookup = data.online;
                 s.clamav.enabled = data.clamav;
+                s.weekly_report = data.weekly;
                 s.decoys = match data.decoys {
                     1 => Decoys::Visible,
                     2 => Decoys::Hidden,

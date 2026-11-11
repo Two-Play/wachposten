@@ -223,6 +223,22 @@ sudo systemctl enable --now snapper-timeline.timer snapper-cleanup.timer
 
 Snapshots lie on the same disk; they do not replace a backup on another disk.
 
+## Packages and file managers
+
+| System | Build | Install |
+|---|---|---|
+| Fedora, RHEL | `packaging/build-rpm.sh` | `sudo dnf install target/rpm/RPMS/x86_64/wachposten-*.rpm` |
+| Debian, Ubuntu | `packaging/build-deb.sh` (needs `clang pkg-config libfontconfig-dev libxkbcommon-dev dpkg-dev`) | `sudo apt install ./target/deb/wachposten_*.deb` |
+| Arch | `cd packaging/arch && makepkg -si` | (done by makepkg) |
+
+Then `sudo systemctl enable --now wachposten-daemon`; the agent starts with the next login.
+
+**Check with Wachposten** in the context menu of Dolphin and GNOME Files (with
+`nautilus-python`) comes with the packages. It runs `wachposten scan-file --notify` on the
+chosen files and folders and shows the result as a notification. Without a package,
+`wachposten integrate` adds it for the current user (Dolphin service menu, Nautilus script);
+`wachposten integrate --remove` takes it away.
+
 ## Usage
 
 ```bash
@@ -241,7 +257,10 @@ wachposten remove <id>
 wachposten quarantine
 wachposten restore <id> [--force]
 wachposten scan              # check now without the agent
-wachposten scan-file <files> # check files for known malware (exit code 1 on a hit)
+wachposten scan-file <files or folders> [--notify]   # known malware (exit code 1 on a hit)
+wachposten scan-file --home [--notify]               # the whole home folder, without tool caches
+wachposten export [--format csv|json] [-o file]      # history, yours and the system's
+wachposten integrate [--remove]                      # "Check with Wachposten" in file managers
 wachposten rules             # rule files and whether they compiled
 wachposten hashes status|update|import <file>
 wachposten config [show|set-key <key>|unset-key|online-lookup on|off|downloads on|off]
@@ -251,6 +270,11 @@ wachposten --system status|events [--all]|show <id>|allow <id>|remove <id>|quara
 
 Settings live in `$XDG_CONFIG_HOME/wachposten/config.toml` (mode 0600); restart the agent
 after changing them.
+
+Once a week the agent sums up what happened (changes noticed, dangerous ones, removed,
+allowed, still open) in a notification; `weekly_report = false` switches it off. The history
+page of the window exports CSV into the download folder; `wachposten export` writes CSV or
+JSON (cells that start like a spreadsheet formula are quoted, so they are not run).
 
 Data lives in `$XDG_DATA_HOME/wachposten` (`state.db`, `hashes.db`, `quarantine/`). Set
 `WACHPOSTEN_NO_CRONTAB=1` to switch crontab watching off. Messages are German when the locale

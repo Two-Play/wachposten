@@ -17,6 +17,8 @@ pub struct Settings {
     pub clamav: ClamAvSettings,
     /// Decoy files for the ransomware check of the system daemon.
     pub decoys: Decoys,
+    /// A short summary of the week as a notification.
+    pub weekly_report: bool,
 }
 
 /// Decoy files in the document, picture, desktop and download folders. Ransomware that
@@ -102,6 +104,7 @@ impl Default for Settings {
             },
             clamav: ClamAvSettings::default(),
             decoys: Decoys::Off,
+            weekly_report: true,
         }
     }
 }

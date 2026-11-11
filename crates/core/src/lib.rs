@@ -7,6 +7,7 @@ pub mod i18n;
 pub mod ipc;
 pub mod model;
 pub mod pkg;
+pub mod report;
 pub mod scanner;
 pub mod settings;
 pub mod store;

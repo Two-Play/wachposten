@@ -17,7 +17,9 @@ export struct EventRow {
     level: string,
     kind: string,
     status: string,
+    // Short for lists, full for the detail view.
     when: string,
+    when-full: string,
     can-decide: bool,
     open: bool,
     // Accepted without a question, but it can still be undone.
@@ -83,6 +85,7 @@ export struct SettingsData {
     clamav: bool,
     // 0 off, 1 visible, 2 hidden
     decoys: int,
+    weekly: bool,
 }
 
 global Theme {
@@ -175,6 +178,12 @@ component NavItem inherits Rectangle {
     callback clicked;
     height: 38px;
     border-radius: 8px;
+    accessible-role: tab;
+    accessible-label: badge > 0 ? label + " (" + badge + ")" : label;
+    accessible-item-selected: active;
+    accessible-action-default => {
+        root.clicked();
+    }
     background: active ? Palette.accent-background.transparentize(0.86) : ta.has-hover ? Theme.subtle : transparent;
     ta := TouchArea {
         clicked => {
@@ -254,6 +263,12 @@ component EventCard inherits Rectangle {
     callback clicked;
     height: 66px;
     border-radius: 8px;
+    accessible-role: list-item;
+    accessible-label: root.event.title + ", " + root.event.kind + ", " + root.event.status;
+    accessible-item-selected: root.selected;
+    accessible-action-default => {
+        root.clicked();
+    }
     background: selected ? Palette.accent-background.transparentize(0.88) : ta.has-hover ? Theme.subtle : Theme.card;
     border-width: 1px;
     border-color: selected ? Palette.accent-background.transparentize(0.5) : Theme.border;
@@ -419,7 +434,7 @@ component EventView inherits VerticalLayout {
                 }
             }
             Text {
-                text: detail.row.when + " · " + detail.row.status;
+                text: detail.row.when-full + " · " + detail.row.status;
                 font-size: 11px;
                 color: Theme.muted;
             }
@@ -458,13 +473,29 @@ component EventsPage inherits VerticalLayout {
     in property <EventDetail> detail;
     in property <string> empty-text;
     in property <image> empty-icon;
+    // A button next to the title, if not empty.
+    in property <string> action-text;
     callback picked(EventRow);
     callback decide(int, bool, bool);
+    callback action();
     padding: 24px;
     spacing: 16px;
-    PageHeader {
-        title: root.title;
-        subtitle: root.subtitle;
+    HorizontalLayout {
+        spacing: 12px;
+        PageHeader {
+            horizontal-stretch: 1;
+            title: root.title;
+            subtitle: root.subtitle;
+        }
+        if root.action-text != "": VerticalLayout {
+            alignment: start;
+            Button {
+                text: root.action-text;
+                clicked => {
+                    root.action();
+                }
+            }
+        }
     }
     HorizontalLayout {
         spacing: 16px;
@@ -551,6 +582,8 @@ export component AppWindow inherits Window {
     callback restore(int, bool);
     callback revoke(string, bool);
     callback save-settings(SettingsData);
+    callback export-history();
+    callback scan-home();
 
     // ok, limited, warning, danger
     property <string> state: status.danger > 0 ? "danger" : status.open > 0 ? "warning" : (!status.agent || !status.daemon) ? "limited" : "ok";
@@ -730,6 +763,12 @@ export component AppWindow inherits Window {
                                         check-now();
                                     }
                                 }
+                                Button {
+                                    text: @tr("Scan my files");
+                                    clicked => {
+                                        scan-home();
+                                    }
+                                }
                             }
                         }
                     }
@@ -858,6 +897,10 @@ export component AppWindow inherits Window {
                 detail: history-detail;
                 empty-text: @tr("Nothing recorded yet.");
                 empty-icon: @image-url("icons/clock.svg");
+                action-text: history-rows.length > 0 ? @tr("Export (CSV)") : "";
+                action => {
+                    export-history();
+                }
                 picked(r) => {
                     pick-history(r);
                 }
@@ -1007,6 +1050,13 @@ export component AppWindow inherits Window {
                             checked: settings.clamav;
                             toggled => {
                                 settings.clamav = self.checked;
+                            }
+                        }
+                        Switch {
+                            text: @tr("Weekly report as a notification");
+                            checked: settings.weekly;
+                            toggled => {
+                                settings.weekly = self.checked;
                             }
                         }
                     }

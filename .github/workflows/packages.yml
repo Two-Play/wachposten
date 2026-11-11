@@ -1,0 +1,73 @@
+name: Packages
+
+# Builds the Debian and Arch packages in clean containers and installs them, so the package
+# scripts keep working. The RPM is built and tested in vm.yml.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deb:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and install the .deb in Debian trixie
+        run: |
+          docker run --rm -v "$PWD":/src -w /src -e CARGO_TARGET_DIR=/tmp/t rust:1-trixie sh -ec '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang pkg-config libfontconfig-dev libxkbcommon-dev dpkg-dev >/dev/null
+            deb=$(packaging/build-deb.sh | tail -1)
+            dpkg-deb -I "$deb"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "./${deb#/src/}" >/dev/null
+            wachposten --version
+            test -f /usr/share/kio/servicemenus/wachposten-scan.desktop
+            grep -q "ExecStart=/usr/bin/wachposten-daemon" /usr/lib/systemd/system/wachposten-daemon.service
+            chown -R '"$(id -u):$(id -g)"' target'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: deb
+          path: target/deb/*.deb
+
+  arch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and install the package in Arch Linux
+        run: |
+          docker run --rm -v "$PWD":/src -w /src archlinux:latest sh -ec '
+            pacman -Syu --noconfirm --needed base-devel cargo clang pkgconf fontconfig libxkbcommon cronie git >/dev/null
+            useradd -m builder
+            chown -R builder /src
+            su builder -c "cd /src/packaging/arch && makepkg --nocheck --noconfirm"
+            pacman -U --noconfirm /src/packaging/arch/wachposten-*.pkg.tar.zst
+            wachposten --version
+            test -f /usr/share/kio/servicemenus/wachposten-scan.desktop
+            chown -R '"$(id -u):$(id -g)"' /src'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: arch
+          path: packaging/arch/*.pkg.tar.zst
+
+  packages-ok:
+    if: always()
+    needs: [deb, arch]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: test "$DEB" = success && test "$ARCH" = success
+        env:
+          DEB: ${{ needs.deb.result }}
+          ARCH: ${{ needs.arch.result }}

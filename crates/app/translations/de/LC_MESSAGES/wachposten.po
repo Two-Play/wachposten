@@ -295,3 +295,12 @@ msgid "{n} dangerous alert"
 msgid_plural "{n} dangerous alerts"
 msgstr[0] "{n} gefährliche Meldung"
 msgstr[1] "{n} gefährliche Meldungen"
+
+msgid "Scan my files"
+msgstr "Meine Dateien prüfen"
+
+msgid "Export (CSV)"
+msgstr "Exportieren (CSV)"
+
+msgid "Weekly report as a notification"
+msgstr "Wochenbericht als Benachrichtigung"

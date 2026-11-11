@@ -70,8 +70,31 @@ enum Command {
     Scan,
     /// Check files for known malware (YARA-X and the hash list) without recording anything.
     ScanFile {
-        #[arg(required = true)]
+        /// Files or folders (folders are checked with everything in them).
+        #[arg(required_unless_present = "home")]
         paths: Vec<PathBuf>,
+        /// Show the result as a desktop notification (for the file manager menus).
+        #[arg(long)]
+        notify: bool,
+        /// Check the whole home folder, without large caches of tools (~/.cache, Flatpak,
+        /// containers, Steam, Rust and npm caches).
+        #[arg(long, conflicts_with = "paths")]
+        home: bool,
+    },
+    /// Write the history (yours and, if the daemon runs, the system's) as CSV or JSON.
+    Export {
+        #[arg(long, value_parser = ["csv", "json"], default_value = "csv")]
+        format: String,
+        /// File to write; standard output if not given.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Add "Check with Wachposten" to the context menu of Dolphin and of GNOME Files for this
+    /// user (packages install it for everyone).
+    Integrate {
+        /// Remove it again.
+        #[arg(long)]
+        remove: bool,
     },
     /// Show the YARA-X rule files and whether they compiled.
     Rules,
@@ -142,6 +165,37 @@ pub(crate) fn agent_running(config: &Config) -> bool {
         return false;
     };
     matches!(file.try_lock(), Err(TryLockError::WouldBlock))
+}
+
+/// The history of this person and, if the daemon answers, of the system, newest first.
+pub fn export(guard: &Guard, format: &str) -> Result<String> {
+    let local = guard.store().recent_events(1_000_000)?;
+    let system = match ipc::call(
+        &socket_path(),
+        &Request::Events {
+            all: true,
+            limit: 1_000_000,
+        },
+    ) {
+        Ok(Reply::Events { events }) => events,
+        _ => Vec::new(),
+    };
+    let mut rows: Vec<_> = local
+        .iter()
+        .map(|e| (e.updated_at, wachposten_core::report::row(e, false)))
+        .chain(
+            system
+                .iter()
+                .map(|e| (e.updated_at, wachposten_core::report::row(e, true))),
+        )
+        .collect();
+    rows.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    let rows: Vec<_> = rows.into_iter().map(|(_, r)| r).collect();
+    Ok(if format == "json" {
+        wachposten_core::report::to_json(&rows)
+    } else {
+        wachposten_core::report::to_csv(&rows)
+    })
 }
 
 fn print_event_line(home: &Path, ev: &Event) {
@@ -261,6 +315,7 @@ fn config_cmd(config: &Config, action: Option<ConfigAction>) -> Result<()> {
 }
 
 mod gui;
+mod scan;
 mod shot;
 
 fn has_display() -> bool {
@@ -490,22 +545,47 @@ fn main() -> Result<()> {
             let path = guard.restore(id, force)?;
             println!("restored {}", pretty(&home, &path));
         }
-        Command::ScanFile { paths } => {
+        Command::ScanFile {
+            paths,
+            notify,
+            home: whole_home,
+        } => {
             let settings = Settings::load(&home)?;
             let scanner = MalwareScanner::from_settings(&settings, &config.data_dir);
-            let mut hits = 0;
-            for path in &paths {
-                let detections = scanner.scan_path(path);
+            let (paths, skip) = if whole_home {
+                (vec![home.clone()], scan::home_skips(&home))
+            } else {
+                (paths, Vec::new())
+            };
+            let report = scan::scan_paths_skipping(&scanner, &paths, &skip, |path, detections| {
                 if detections.is_empty() {
-                    println!("clean     {}", path.display());
+                    if !notify {
+                        println!("clean     {}", path.display());
+                    }
+                } else {
+                    for d in detections {
+                        println!("MALWARE   {}  {}", path.display(), d.label());
+                    }
                 }
-                for d in detections {
-                    hits += 1;
-                    println!("MALWARE   {}  {}", path.display(), d.label());
-                }
+            });
+            if notify {
+                scan::notify(&report);
+            } else if report.skipped > 0 {
+                println!("({} files could not be read)", report.skipped);
             }
-            if hits > 0 {
+            if !report.hits.is_empty() {
                 std::process::exit(1);
+            }
+        }
+        Command::Integrate { remove } => scan::integrate(&home, remove)?,
+        Command::Export { format, output } => {
+            let text = export(&guard, &format)?;
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, text)?;
+                    println!("written to {}", path.display());
+                }
+                None => print!("{text}"),
             }
         }
         Command::Rules => {
