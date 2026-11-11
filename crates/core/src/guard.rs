@@ -237,6 +237,7 @@ impl Guard {
                     }
                     continue;
                 }
+                s.close_noted(path)?;
 
                 let kind = cur
                     .or(base)
@@ -301,6 +302,13 @@ impl Guard {
 
                 let added = analyze::added_lines(base_entry, cur_entry);
                 let mut findings = analyze::findings(kind, cur_entry, &added);
+                if path == "/etc/ld.so.preload" && !added.is_empty() {
+                    // Every library listed there is loaded into every program.
+                    findings.push(Finding {
+                        rule: "preload".into(),
+                        line: added[0].chars().take(300).collect(),
+                    });
+                }
                 if let Some(scanner) = &self.scanner {
                     if path != CRONTAB_PATH && matches!(cur_entry, Entry::File { .. }) {
                         findings.extend(scanner.scan(Path::new(path)));
@@ -310,6 +318,13 @@ impl Guard {
                     }
                 }
                 let severity = severity_for(&findings);
+                // Nothing looked dangerous: accept it right away, keep the old state so the
+                // person can still undo it, and only show a short hint.
+                let noted = findings.is_empty() && analyze::may_note(kind);
+                if noted && let Some(ev) = &open {
+                    // The dangerous part of an earlier version is gone again.
+                    s.resolve_event(ev.id, Status::Reverted, None)?;
+                }
                 let new = NewEvent {
                     path,
                     kind,
@@ -319,7 +334,7 @@ impl Guard {
                         Change::Created
                     },
                     severity,
-                    status: Status::Open,
+                    status: if noted { Status::Noted } else { Status::Open },
                     old_hash: hash_of(base_entry),
                     new_entry: Some(cur_entry),
                     findings: &findings,
@@ -327,12 +342,16 @@ impl Guard {
                     uid: None,
                 };
                 let id = match open {
-                    Some(ev) => {
+                    Some(ev) if !noted => {
                         s.update_event(ev.id, &new)?;
                         ev.id
                     }
-                    None => s.insert_event(&new)?,
+                    _ => s.insert_event(&new)?,
                 };
+                if noted {
+                    s.set_old_entry(id, base_entry)?;
+                    s.set_baseline(path, kind, Some(cur_entry))?;
+                }
                 changed_ids.push(id);
             }
             Ok(())
@@ -440,7 +459,7 @@ impl Guard {
     /// Load an open event and check that the entry on disk still is what the person saw.
     fn check_decision(&self, id: i64, seen_hash: Option<&str>) -> Result<Event> {
         let ev = self.store.event(id)?.ok_or(DecisionError::NotFound(id))?;
-        if ev.status != Status::Open {
+        if !ev.decidable() {
             bail!(DecisionError::AlreadyResolved(id));
         }
         if seen_hash.is_some_and(|h| h != ev.new_hash()) {
@@ -475,6 +494,11 @@ impl Guard {
         let new_entry = ev.new_entry.clone().context("event has no new state")?;
         let baseline = if ev.kind.is_file_report() {
             None
+        } else if ev.status == Status::Noted {
+            // The change is already in the baseline; go back to what was there before.
+            self.store
+                .old_entry(ev.id)?
+                .ok_or_else(|| DecisionError::CannotRestore(ev.path.clone()))?
         } else {
             self.store.baseline_entry(&ev.path)?
         };
@@ -515,6 +539,9 @@ impl Guard {
             }
         }
         self.store.transaction(|s| {
+            if ev.status == Status::Noted {
+                s.set_baseline(&ev.path, ev.kind, baseline.as_ref())?;
+            }
             s.resolve_event(ev.id, Status::Removed, Some(qid))?;
             Ok(())
         })?;

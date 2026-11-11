@@ -65,6 +65,40 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
     ]
 });
 
+/// Rules that on their own mark a change as dangerous enough for a question. The other rules
+/// also match plenty of harmless setups and only lead to a warning.
+const STRONG_RULES: &[&str] = &[
+    "preload",
+    "pipe-to-shell",
+    "reverse-shell",
+    "forced-command",
+    crate::scanner::MALWARE_RULE,
+];
+
+/// Kinds that start programs on their own, where a path in a temporary folder means a
+/// program is started from there.
+const STARTERS: &[Kind] = &[
+    Kind::Autostart,
+    Kind::SystemdUser,
+    Kind::SystemdSystem,
+    Kind::Crontab,
+];
+
+/// Whether `findings` in an entry of `kind` should interrupt the person with a question.
+pub fn alarming(kind: Kind, findings: &[Finding]) -> bool {
+    findings.iter().any(|f| {
+        STRONG_RULES.contains(&f.rule.as_str())
+            || (f.rule == "temp-path" && STARTERS.contains(&kind))
+    })
+}
+
+/// Whether a change of `kind` without findings may be accepted with only a hint. A new SSH
+/// key, sudo rule or library path gives no pattern to match and is rare on a desktop, so it
+/// always waits for a decision.
+pub fn may_note(kind: Kind) -> bool {
+    !matches!(kind, Kind::Ssh | Kind::Privileges | Kind::Preload)
+}
+
 /// Lines in `exec_key=` style keys of desktop entries and systemd units.
 static EXEC_LINE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(

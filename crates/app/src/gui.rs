@@ -71,6 +71,10 @@ fn status_label(status: Status) -> &'static str {
         Status::Removed => tr("entfernt", "removed"),
         Status::Reverted => tr("rückgängig gemacht", "undone"),
         Status::Accepted => tr("aufgezeichnet", "recorded"),
+        Status::Noted => tr(
+            "unbedenklich, noch rückgängig zu machen",
+            "harmless, can still be undone",
+        ),
     }
 }
 
@@ -95,7 +99,8 @@ fn row(state: &State, item: &Item) -> EventRow {
         status: status_label(ev.status).into(),
         when: when(ev.updated_at).into(),
         can_decide: item.can_decide,
-        open: ev.status == Status::Open,
+        open: ev.decidable(),
+        noted: ev.status == Status::Noted,
     }
 }
 
@@ -196,7 +201,7 @@ fn load(state: &mut State, ui: &AppWindow) -> Result<()> {
             if let Some(Reply::Events { events }) = daemon(&Request::Events { all, limit: 300 }) {
                 for ev in events {
                     // `Show` tells whether this person may decide.
-                    let can_decide = ev.status == Status::Open
+                    let can_decide = ev.decidable()
                         && matches!(
                             daemon(&Request::Show { id: ev.id }),
                             Some(Reply::Event {

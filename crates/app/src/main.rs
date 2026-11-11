@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use wachposten_core::i18n;
 use wachposten_core::ipc::{self, Reply, Request};
 use wachposten_core::settings::settings_path;
-use wachposten_core::{Config, Entry, Event, Guard, Outcome, Settings, Status};
+use wachposten_core::{Config, Entry, Event, Guard, Outcome, Settings};
 use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, bazaar, hash_db_path};
 
 #[derive(Parser)]
@@ -337,7 +337,7 @@ fn system_cmd(command: Command) -> Result<()> {
         Command::Show { id } => {
             if let Reply::Event { event, can_decide } = daemon(&Request::Show { id })? {
                 show_event(root, &event);
-                if !can_decide && event.status == Status::Open {
+                if !can_decide && event.decidable() {
                     println!("\n(an admin decides about this event)");
                 }
             }
@@ -520,7 +520,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let events = guard.rescan()?;
-            let open: Vec<_> = events.iter().filter(|e| e.status == Status::Open).collect();
+            let open: Vec<_> = events.iter().filter(|e| e.decidable()).collect();
             if open.is_empty() {
                 println!("no new changes");
             }

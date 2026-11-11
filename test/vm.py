@@ -255,10 +255,11 @@ WantedBy=multi-user.target
 EOF
 systemctl enable evil.service""")
         unit = wait_for(lambda: find(events(vm, "fedora"), "/etc/systemd/system/evil.service", "open"))
-        link = wait_for(lambda: find(events(vm, "fedora"),
-                                     "/etc/systemd/system/multi-user.target.wants/evil.service", "open"))
+        # The link itself looks harmless: it is only noted, but can still be removed.
+        link = wait_for(lambda: find(events(vm, "fedora", all_=True),
+                                     "/etc/systemd/system/multi-user.target.wants/evil.service", "noted"))
         check("new system service raises a question", unit and unit["severity"] == "suspicious", unit)
-        check("enablement link raises a question", link is not None, link)
+        check("enablement link is noted", link is not None, link)
         seen = find(events(vm, "gast"), "/etc/systemd/system/evil.service", "open")
         check("non-admin sees system events", seen is not None)
         if unit:

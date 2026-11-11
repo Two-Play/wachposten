@@ -1,4 +1,6 @@
-//! Desktop notifications with "Allow / Remove / Later" buttons.
+//! Desktop notifications in three levels: a question with "Allow / Remove / Later" buttons
+//! for dangerous changes, a warning for suspicious ones that wait in the tray, and a short
+//! hint for harmless changes that were accepted right away.
 
 use std::path::Path;
 use std::sync::mpsc::Sender;
@@ -154,6 +156,56 @@ pub fn ask(home: &Path, ev: &Event, tx: Sender<Msg>, system: bool, can_decide: b
                 decision,
                 system,
             });
+        });
+    });
+}
+
+/// A short message about an event that needs no answer now: a warning for an open event, a
+/// hint for a noted one. "Show" opens the window.
+pub fn passive(home: &Path, ev: &Event, tx: Sender<Msg>, system: bool) {
+    let noted = ev.status == wachposten_core::Status::Noted;
+    let title = i18n::event_title(ev);
+    let summary = if system {
+        format!("{}: {title}", tr("System", "System"))
+    } else {
+        title
+    };
+    let footer = if noted {
+        tr(
+            "Sieht unbedenklich aus und wurde übernommen. Rückgängig machen geht im Verlauf.",
+            "Looks harmless and was accepted. You can undo it in the history.",
+        )
+    } else {
+        tr(
+            "Etwas ungewöhnlich. Entscheide im Tray oder im Fenster, wenn du Zeit hast.",
+            "A little unusual. Decide in the tray or the window when you have time.",
+        )
+    };
+    let mut n = Notification::new();
+    n.appname(APP)
+        .summary(&summary)
+        .body(&format!("{}\n\n{footer}", body(home, ev)))
+        .icon(if noted {
+            "security-high"
+        } else {
+            "security-medium"
+        })
+        .urgency(Urgency::Low)
+        .timeout(Timeout::Milliseconds(if noted { 6000 } else { 12000 }))
+        .action("default", tr("Ansehen", "Show"))
+        .action("show", tr("Ansehen", "Show"));
+    let handle = match n.show() {
+        Ok(h) => h,
+        Err(e) => {
+            log::error!("cannot show notification: {e}");
+            return;
+        }
+    };
+    thread::spawn(move || {
+        handle.wait_for_action(|action| {
+            if action == "default" || action == "show" {
+                let _ = tx.send(Msg::OpenWindow);
+            }
         });
     });
 }
