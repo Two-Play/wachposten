@@ -46,12 +46,6 @@ install -Dm644 packaging/daemon.toml %{buildroot}%{_sysconfdir}/wachposten/daemo
 install -Dm644 packaging/wachposten.desktop %{buildroot}%{_datadir}/applications/wachposten.desktop
 install -Dm644 packaging/wachposten-agent-autostart.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/wachposten-agent.desktop
 install -Dm644 crates/app/ui/icon.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/wachposten.svg
-%dir %{_datadir}/kio
-%dir %{_datadir}/kio/servicemenus
-%{_datadir}/kio/servicemenus/wachposten-scan.desktop
-%dir %{_datadir}/nautilus-python
-%dir %{_datadir}/nautilus-python/extensions
-%{_datadir}/nautilus-python/extensions/wachposten.py
 install -Dm644 packaging/integration/wachposten-scan.desktop %{buildroot}%{_datadir}/kio/servicemenus/wachposten-scan.desktop
 install -Dm644 packaging/integration/wachposten-nautilus.py %{buildroot}%{_datadir}/nautilus-python/extensions/wachposten.py
 
@@ -77,6 +71,12 @@ install -Dm644 packaging/integration/wachposten-nautilus.py %{buildroot}%{_datad
 %config(noreplace) %{_sysconfdir}/xdg/autostart/wachposten-agent.desktop
 %{_datadir}/applications/wachposten.desktop
 %{_datadir}/icons/hicolor/scalable/apps/wachposten.svg
+%dir %{_datadir}/kio
+%dir %{_datadir}/kio/servicemenus
+%{_datadir}/kio/servicemenus/wachposten-scan.desktop
+%dir %{_datadir}/nautilus-python
+%dir %{_datadir}/nautilus-python/extensions
+%{_datadir}/nautilus-python/extensions/wachposten.py
 
 %changelog
 * Sun Nov 08 2026 Philippe <twoplay19@gmail.com> - 0.1.0-1
