@@ -16,7 +16,7 @@ use wachposten_core::ipc::{self, Reply, Request};
 use wachposten_core::scanner::MALWARE_RULE;
 use wachposten_core::settings::Decoys;
 use wachposten_core::{Config, Event, Guard, Outcome, Settings, Status};
-use wachposten_scan::{HashDb, YaraEngine, clamav::ClamAv, hash_db_path};
+use wachposten_scan::{ClamState, HashDb, MalwareScanner, YaraEngine, hash_db_path};
 
 slint::include_modules!();
 
@@ -36,7 +36,18 @@ struct State {
     open_pick: Option<(bool, i64)>,
     history_pick: Option<(bool, i64)>,
     yara_rules: usize,
-    local_clamav: bool,
+    local_clamav: ClamState,
+}
+
+/// The more useful of the window's own and the daemon's view of ClamAV.
+fn best_clam_state(a: ClamState, b: ClamState) -> ClamState {
+    let rank = |s: ClamState| match s {
+        ClamState::Off => 0,
+        ClamState::NotInstalled => 1,
+        ClamState::NotRunning => 2,
+        ClamState::Running => 3,
+    };
+    if rank(a) >= rank(b) { a } else { b }
 }
 
 fn socket() -> PathBuf {
@@ -294,6 +305,11 @@ fn load(state: &mut State, ui: &AppWindow) -> Result<()> {
         ),
         _ => (false, false, 0, 0, false, false),
     };
+    let sys_clam_state = match &daemon_status {
+        Some(Reply::Status { clamav_state, .. }) => ClamState::parse(clamav_state),
+        _ => ClamState::Off,
+    };
+    let clam_state = best_clam_state(state.local_clamav, sys_clam_state);
     let (ransomware, home_btrfs, snapshots) = match &daemon_status {
         Some(Reply::Status {
             ransomware,
@@ -317,7 +333,14 @@ fn load(state: &mut State, ui: &AppWindow) -> Result<()> {
         yara_rules: state.yara_rules.max(sys_rules) as i32,
         known_hashes: local_hashes.max(sys_hashes) as i32,
         hash_updates: settings.hashes.malwarebazaar_auth_key.is_some(),
-        clamav: state.local_clamav || sys_clam,
+        clamav: clam_state == ClamState::Running || sys_clam,
+        clamav_state: match clam_state {
+            ClamState::Off => 0,
+            ClamState::NotInstalled => 1,
+            ClamState::NotRunning => 2,
+            ClamState::Running => 3,
+        },
+        clamav_setup: wachposten_scan::clamav::setup_commands().into(),
         baseline: state.guard.store().baseline_count()? as i32,
         open: state.open.len() as i32,
         danger: state
@@ -551,8 +574,7 @@ pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<(
     } else {
         0
     };
-    let local_clamav = settings.clamav.enabled
-        && ClamAv::find(settings.clamav.socket.as_deref(), 1).is_some_and(|c| c.ping().is_ok());
+    let local_clamav = MalwareScanner::probe_clamav(&settings.clamav);
     ui.set_settings(settings_data(&settings));
 
     let state = Rc::new(RefCell::new(State {
@@ -745,6 +767,43 @@ pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<(
                 }
                 Err(e) => show(&ui, format!("{e:#}"), true),
             }
+        });
+    }
+    {
+        let state = state.clone();
+        let weak = ui.as_weak();
+        let refresh = refresh.clone();
+        ui.on_recheck_clamav(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let settings = Settings::load(&state.borrow().home).unwrap_or_default();
+            state.borrow_mut().local_clamav = MalwareScanner::probe_clamav(&settings.clamav);
+            let system = match daemon(&Request::RecheckClamav) {
+                Some(Reply::Done { message }) => ClamState::parse(&message),
+                _ => ClamState::Off,
+            };
+            let found = best_clam_state(state.borrow().local_clamav, system);
+            show(
+                &ui,
+                match found {
+                    ClamState::Running => {
+                        tr("ClamAV läuft und wird genutzt.", "ClamAV runs and is used.")
+                    }
+                    ClamState::NotRunning => tr(
+                        "clamd ist installiert, antwortet aber nicht.",
+                        "clamd is installed but does not answer.",
+                    ),
+                    ClamState::NotInstalled => {
+                        tr("clamd ist nicht installiert.", "clamd is not installed.")
+                    }
+                    ClamState::Off => tr(
+                        "ClamAV ist in den Einstellungen aus.",
+                        "ClamAV is off in the settings.",
+                    ),
+                }
+                .to_string(),
+                found != ClamState::Running,
+            );
+            refresh();
         });
     }
     {

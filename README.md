@@ -155,6 +155,20 @@ programs are left to YARA-X. ClamAV is skipped while a program start is held up.
 clamd socket belongs to the `virusgroup` group, so the agent needs that group or uses the
 daemon's scans.
 
+clamd may be installed or started at any time: the daemon and the agent look for it again every
+minute, and **Check again** on the overview does it at once. When clamd is installed but does
+not answer, the overview shows the commands that set it up. Fedora ships the socket line
+commented out and no virus signatures:
+
+```bash
+sudo sed -i '0,/^#LocalSocket /s//LocalSocket /' /etc/clamd.d/scan.conf
+sudo freshclam
+sudo systemctl enable --now clamav-freshclam clamd@scan
+```
+
+On Debian, Ubuntu and Arch: `sudo freshclam` and
+`sudo systemctl enable --now clamav-freshclam clamav-daemon`.
+
 ## eBPF and packages (stage 5)
 
 The daemon loads a small eBPF program (C, `crates/daemon/bpf/`, built with clang and loaded
@@ -235,7 +249,9 @@ Then `sudo systemctl enable --now wachposten-daemon`; the agent starts with the 
 
 **Check with Wachposten** in the context menu of Dolphin and GNOME Files (with
 `nautilus-python`) comes with the packages. It runs `wachposten scan-file --notify` on the
-chosen files and folders and shows the result as a notification. Without a package,
+chosen files and folders and shows the result as a notification. Each file found becomes an
+alert in the window (Remove puts it into quarantine, Allow keeps it), and the notification
+names the full path and offers **Quarantine** and **Show**. Without a package,
 `wachposten integrate` adds it for the current user (Dolphin service menu, Nautilus script);
 `wachposten integrate --remove` takes it away.
 

@@ -9,10 +9,12 @@ pub mod yara;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use wachposten_core::scanner::MALWARE_RULE;
+use wachposten_core::settings::ClamAvSettings;
 use wachposten_core::{FileScanner, Finding, Settings};
 
 pub use hashdb::HashDb;
@@ -69,10 +71,48 @@ pub fn hash_db_path(data_dir: &Path) -> PathBuf {
     data_dir.join("hashes.db")
 }
 
+/// Whether ClamAV can be used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClamState {
+    /// Switched off in the settings.
+    #[default]
+    Off,
+    /// No clamd program on this system.
+    NotInstalled,
+    /// clamd is installed but does not answer (not started, or not set up yet).
+    NotRunning,
+    Running,
+}
+
+impl ClamState {
+    /// Short name for logs and IPC.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClamState::Off => "off",
+            ClamState::NotInstalled => "not-installed",
+            ClamState::NotRunning => "not-running",
+            ClamState::Running => "running",
+        }
+    }
+
+    pub fn parse(s: &str) -> ClamState {
+        match s {
+            "not-installed" => ClamState::NotInstalled,
+            "not-running" => ClamState::NotRunning,
+            "running" => ClamState::Running,
+            _ => ClamState::Off,
+        }
+    }
+}
+
+/// How often a scanner looks for clamd again (it may be started or stopped at any time).
+pub const CLAMAV_RECHECK: Duration = Duration::from_secs(60);
+
 pub struct MalwareScanner {
     pub yara: Option<YaraEngine>,
     pub hashes: Option<HashDb>,
-    pub clamav: Option<clamav::ClamAv>,
+    clam_settings: Option<ClamAvSettings>,
+    clamav: RwLock<(ClamState, Option<clamav::ClamAv>)>,
     online_key: Option<String>,
     max_scan_bytes: u64,
 }
@@ -87,7 +127,8 @@ impl MalwareScanner {
         MalwareScanner {
             yara,
             hashes,
-            clamav: None,
+            clam_settings: None,
+            clamav: RwLock::new((ClamState::Off, None)),
             online_key,
             max_scan_bytes: max_scan_mb.saturating_mul(1024 * 1024),
         }
@@ -114,19 +155,54 @@ impl MalwareScanner {
             .with_clamav(&settings.clamav)
     }
 
-    /// Add ClamAV if it is switched on and a clamd socket exists.
-    pub fn with_clamav(mut self, settings: &wachposten_core::settings::ClamAvSettings) -> Self {
-        if settings.enabled {
-            self.clamav = clamav::ClamAv::find(settings.socket.as_deref(), settings.max_scan_mb);
-            match &self.clamav {
-                Some(c) => match c.ping() {
-                    Ok(()) => log::info!("ClamAV at {}", c.socket().display()),
-                    Err(e) => log::info!("ClamAV not usable: {e:#}"),
-                },
-                None => log::info!("no clamd found; ClamAV is not used"),
+    /// Use ClamAV if it is switched on and clamd answers. Call
+    /// [`recheck_clamav`](Self::recheck_clamav) later to notice a clamd started afterwards.
+    pub fn with_clamav(mut self, settings: &ClamAvSettings) -> Self {
+        self.clam_settings = settings.enabled.then(|| settings.clone());
+        self.recheck_clamav();
+        self
+    }
+
+    /// Look for clamd again and return what was found. Logs only changes.
+    pub fn recheck_clamav(&self) -> ClamState {
+        let (state, found) = match &self.clam_settings {
+            None => (ClamState::Off, None),
+            Some(settings) => {
+                match clamav::ClamAv::find(settings.socket.as_deref(), settings.max_scan_mb) {
+                    Some(c) if c.ping().is_ok() => (ClamState::Running, Some(c)),
+                    _ if clamav::installed() => (ClamState::NotRunning, None),
+                    _ => (ClamState::NotInstalled, None),
+                }
+            }
+        };
+        let mut slot = self.clamav.write().unwrap_or_else(|e| e.into_inner());
+        if slot.0 != state
+            || slot.1.as_ref().map(clamav::ClamAv::socket)
+                != found.as_ref().map(clamav::ClamAv::socket)
+        {
+            match (&found, state) {
+                (Some(c), _) => log::info!("ClamAV at {}", c.socket().display()),
+                (None, ClamState::NotRunning) => {
+                    log::info!("clamd is installed but does not answer; ClamAV is not used")
+                }
+                (None, ClamState::NotInstalled) => log::info!("no clamd found; ClamAV is not used"),
+                (None, _) => {}
             }
         }
-        self
+        *slot = (state, found);
+        state
+    }
+
+    /// Look for clamd once, without a scanner.
+    pub fn probe_clamav(settings: &ClamAvSettings) -> ClamState {
+        MalwareScanner::new(None, None, None, 1)
+            .with_clamav(settings)
+            .clamav_state()
+    }
+
+    /// What the last check found.
+    pub fn clamav_state(&self) -> ClamState {
+        self.clamav.read().unwrap_or_else(|e| e.into_inner()).0
     }
 
     /// Check one regular file. Errors are logged; an unreadable file gives no detections.
@@ -181,7 +257,8 @@ impl MalwareScanner {
         }
 
         // ClamAV is a network round trip and slow on large files: not while a start waits.
-        if let Some(clam) = &self.clamav
+        let clamav = self.clamav.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(clam) = &clamav.1
             && budget.is_none()
         {
             match clam.scan(path) {
@@ -239,6 +316,19 @@ impl MalwareScanner {
             }
         }
     }
+}
+
+/// Look for clamd again now and then, so one started (or stopped) later is noticed.
+pub fn spawn_clamav_rechecks(scanner: Arc<MalwareScanner>) {
+    if scanner.clam_settings.is_none() {
+        return;
+    }
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(CLAMAV_RECHECK);
+            scanner.recheck_clamav();
+        }
+    });
 }
 
 /// Turn detections into core findings.

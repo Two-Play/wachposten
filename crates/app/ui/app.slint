@@ -70,6 +70,10 @@ export struct StatusInfo {
     known-hashes: int,
     hash-updates: bool,
     clamav: bool,
+    // 0 off in the settings, 1 not installed, 2 installed but not answering, 3 in use
+    clamav-state: int,
+    // Commands that set up and start clamd on this distribution.
+    clamav-setup: string,
     baseline: int,
     open: int,
     // Open alerts that are dangerous (they asked with a popup).
@@ -576,6 +580,7 @@ export component AppWindow inherits Window {
 
     callback refresh();
     callback check-now();
+    callback recheck-clamav();
     callback pick-open(EventRow);
     callback pick-history(EventRow);
     callback decide(int, bool, bool);
@@ -818,8 +823,18 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    SectionTitle {
-                        text: @tr("Known malware");
+                    HorizontalLayout {
+                        SectionTitle {
+                            text: @tr("Known malware");
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: @tr("Check again");
+                            clicked => {
+                                recheck-clamav();
+                            }
+                        }
                     }
                     HorizontalLayout {
                         spacing: 10px;
@@ -842,7 +857,39 @@ export component AppWindow inherits Window {
                             preferred-width: 1px;
                             ok: status.clamav;
                             title: @tr("ClamAV");
-                            value: status.clamav ? @tr("in use for Windows files, Office, PDF and archives") : @tr("not available – install and start clamd to use it");
+                            value: status.clamav ? @tr("in use for Windows files, Office, PDF and archives") : status.clamav-state == 2 ? @tr("installed, but clamd does not run yet") : status.clamav-state == 0 ? @tr("switched off in Settings") : @tr("not installed (optional)");
+                        }
+                    }
+                    if !status.clamav && status.clamav-state == 2: Card {
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            Text {
+                                text: @tr("clamd is installed but does not answer. On most systems it needs virus signatures and has to be started once. In a terminal:");
+                                wrap: word-wrap;
+                                font-size: 12px;
+                            }
+                            Rectangle {
+                                background: Theme.subtle;
+                                border-radius: 6px;
+                                VerticalLayout {
+                                    padding: 10px;
+                                    TextInput {
+                                        text: status.clamav-setup;
+                                        read-only: true;
+                                        single-line: false;
+                                        wrap: word-wrap;
+                                        font-family: "monospace";
+                                        font-size: 12px;
+                                    }
+                                }
+                            }
+                            Text {
+                                text: @tr("Then press \"Check again\". Wachposten also looks for clamd by itself every minute.");
+                                wrap: word-wrap;
+                                color: Theme.muted;
+                                font-size: 12px;
+                            }
                         }
                     }
 

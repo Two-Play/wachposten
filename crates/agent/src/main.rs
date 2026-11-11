@@ -405,6 +405,7 @@ fn main() -> Result<()> {
     if let Some(key) = settings.hashes.malwarebazaar_auth_key.clone() {
         wachposten_scan::spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
     }
+    wachposten_scan::spawn_clamav_rechecks(scanner.clone());
 
     let tick_tx = tx.clone();
     thread::spawn(move || {
