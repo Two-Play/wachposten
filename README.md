@@ -1,5 +1,7 @@
 # Wachposten
 
+[![CI](https://github.com/Two-Play/wachposten/actions/workflows/ci.yml/badge.svg)](https://github.com/Two-Play/wachposten/actions/workflows/ci.yml)
+
 Wachposten guards a Linux desktop against malware that tries to settle in. Malware on
 Linux has to start again after a reboot or login, and the places it can use for that are few:
 autostart entries, systemd user units, shell startup files, cron, `LD_PRELOAD`, SSH keys.
