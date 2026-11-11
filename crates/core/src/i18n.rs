@@ -59,6 +59,13 @@ pub fn kind_label(kind: Kind) -> &'static str {
             "program start from a temporary folder",
         ),
         Kind::Ransomware => tr("Erpressungs-Software", "ransomware"),
+        Kind::Applications => tr(
+            "Programmstarter und Dateizuordnungen",
+            "launchers and file handlers",
+        ),
+        Kind::Browser => tr("Browser-Erweiterung", "browser extension"),
+        Kind::DevTools => tr("Entwickler-Werkzeuge", "developer tools"),
+        Kind::Hooks => tr("Paketmanager-Hook", "package manager hook"),
     }
 }
 
@@ -115,6 +122,14 @@ pub fn rule_label(rule: &str) -> &'static str {
             "tarnt sich mit dem Namen eines Systemprozesses",
             "poses as a system process by name",
         ),
+        "pth-code" => tr(
+            "führt bei jedem Python-Start Code aus",
+            "runs code at every Python start",
+        ),
+        "git-command" => tr(
+            "lässt git einen Befehl oder Hook ausführen",
+            "makes git run a command or hook",
+        ),
         "ransomware" => tr(
             "verschlüsselt anscheinend deine Dateien",
             "seems to encrypt your files",
@@ -167,6 +182,18 @@ pub fn event_title(ev: &Event) -> String {
             "{}: {name}",
             tr("SSH-Zugang geändert", "SSH access changed")
         ),
+        (Kind::Browser, Change::Created) => format!(
+            "{}: {name}",
+            tr("Neue Browser-Erweiterung", "New browser extension")
+        ),
+        (Kind::Browser, _) => format!(
+            "{}: {name}",
+            tr("Browser-Einstellung geändert", "Browser setting changed")
+        ),
+        (Kind::Hooks, _) => format!(
+            "{}: {name}",
+            tr("Paketmanager-Hook", "Package manager hook")
+        ),
         (Kind::Crontab, _) => {
             tr("Zeitgesteuerte Aufgabe geändert", "Scheduled task changed").into()
         }
@@ -178,6 +205,22 @@ pub fn event_title(ev: &Event) -> String {
 /// One-sentence explanation of what happened.
 pub fn event_sentence(ev: &Event) -> &'static str {
     match (ev.kind, ev.change) {
+        (Kind::Applications, _) => tr(
+            "Ein Programmstarter, eine Dateizuordnung oder ein Rechtsklick-Eintrag wurde angelegt oder geändert. Er startet ein Programm, sobald du eine Datei öffnest oder den Eintrag wählst.",
+            "A launcher, file handler or right-click action was added or changed. It starts a program when you open a file or pick the entry.",
+        ),
+        (Kind::Browser, _) => tr(
+            "Eine Browser-Erweiterung oder eine Browser-Richtlinie wurde hinzugefügt oder geändert. Erweiterungen können alles mitlesen, was du im Browser tust.",
+            "A browser extension or browser policy was added or changed. Extensions can read everything you do in the browser.",
+        ),
+        (Kind::DevTools, _) => tr(
+            "Eine Einstellung von git oder Python wurde geändert, die Befehle ausführen kann (Hooks, Aliase, .pth-Dateien).",
+            "A git or Python setting that can run commands was changed (hooks, aliases, .pth files).",
+        ),
+        (Kind::Hooks, _) => tr(
+            "Ein Hook des Paketmanagers wurde angelegt oder geändert. Er läuft bei jeder Installation mit Root-Rechten.",
+            "A package manager hook was added or changed. It runs with root rights on every install.",
+        ),
         (Kind::Autostart, _) => tr(
             "Ein Programm hat sich in deinen Autostart eingetragen.",
             "A program added itself to your autostart.",

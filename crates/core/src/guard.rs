@@ -322,7 +322,8 @@ impl Guard {
                 let severity = severity_for(&findings);
                 // Nothing looked dangerous: accept it right away, keep the old state so the
                 // person can still undo it, and only show a short hint.
-                let noted = findings.is_empty() && analyze::may_note(kind);
+                let noted =
+                    findings.is_empty() && analyze::may_note(kind, path, base_entry.is_none());
                 if noted && let Some(ev) = &open {
                     // The dangerous part of an earlier version is gone again.
                     s.resolve_event(ev.id, Status::Reverted, None)?;

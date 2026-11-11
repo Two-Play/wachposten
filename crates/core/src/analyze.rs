@@ -57,6 +57,12 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             r"\bchmod\b[^\n]*\+x\b|\bchmod\s+[0-7]?[0-7][1357][0-7]\b",
             &[],
         ),
+        rule("pth-code", r"^\s*import\s", &[Kind::DevTools]),
+        rule(
+            "git-command",
+            r"(?i)^\s*(hookspath|fsmonitor|sshcommand|pager|editor)\s*=|=\s*!",
+            &[Kind::DevTools],
+        ),
         rule(
             "forced-command",
             r#"(^|,)\s*(command|environment)=""#,
@@ -82,6 +88,8 @@ const STARTERS: &[Kind] = &[
     Kind::SystemdUser,
     Kind::SystemdSystem,
     Kind::Crontab,
+    Kind::Hooks,
+    Kind::Applications,
 ];
 
 /// Whether `findings` in an entry of `kind` should interrupt the person with a question.
@@ -92,11 +100,17 @@ pub fn alarming(kind: Kind, findings: &[Finding]) -> bool {
     })
 }
 
-/// Whether a change of `kind` without findings may be accepted with only a hint. A new SSH
-/// key, sudo rule or library path gives no pattern to match and is rare on a desktop, so it
-/// always waits for a decision.
-pub fn may_note(kind: Kind) -> bool {
-    !matches!(kind, Kind::Ssh | Kind::Privileges | Kind::Preload)
+/// Whether a change of `path` (`kind`) without findings may be accepted with only a hint. A
+/// new SSH key, sudo rule or library path gives no pattern to match and is rare on a desktop,
+/// so it always waits for a decision. So does a new browser extension (it can read everything
+/// in the browser) and a package hook (it runs as root); an update of an extension that is
+/// already installed (`created` false) only gives a hint.
+pub fn may_note(kind: Kind, path: &str, created: bool) -> bool {
+    match kind {
+        Kind::Ssh | Kind::Privileges | Kind::Preload | Kind::Hooks => false,
+        Kind::Browser => !created && path.ends_with(".xpi"),
+        _ => true,
+    }
 }
 
 /// Lines in `exec_key=` style keys of desktop entries and systemd units.

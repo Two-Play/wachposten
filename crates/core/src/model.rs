@@ -35,10 +35,19 @@ pub enum Kind {
     TempExec,
     /// A program that seems to encrypt the person's files; the daemon stopped it.
     Ransomware,
+    /// Menu entries, file type handlers and file manager actions: they run a program when
+    /// the person opens a file or clicks an entry.
+    Applications,
+    /// Browser extensions and browser policies.
+    Browser,
+    /// Settings of developer tools that run commands (git, Python `.pth` files).
+    DevTools,
+    /// Hooks of package managers, run as root on every install.
+    Hooks,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 13] = [
+    pub const ALL: [Kind; 17] = [
         Kind::Autostart,
         Kind::SystemdUser,
         Kind::ShellRc,
@@ -52,6 +61,10 @@ impl Kind {
         Kind::Privileges,
         Kind::TempExec,
         Kind::Ransomware,
+        Kind::Applications,
+        Kind::Browser,
+        Kind::DevTools,
+        Kind::Hooks,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -69,6 +82,10 @@ impl Kind {
             Kind::Privileges => "privileges",
             Kind::TempExec => "temp-exec",
             Kind::Ransomware => "ransomware",
+            Kind::Applications => "applications",
+            Kind::Browser => "browser",
+            Kind::DevTools => "dev-tools",
+            Kind::Hooks => "hooks",
         }
     }
 
