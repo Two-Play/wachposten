@@ -58,6 +58,7 @@ pub fn kind_label(kind: Kind) -> &'static str {
             "Programmstart aus temporärem Ordner",
             "program start from a temporary folder",
         ),
+        Kind::Ransomware => tr("Erpressungs-Software", "ransomware"),
     }
 }
 
@@ -114,6 +115,11 @@ pub fn rule_label(rule: &str) -> &'static str {
             "tarnt sich mit dem Namen eines Systemprozesses",
             "poses as a system process by name",
         ),
+        "ransomware" => tr(
+            "verschlüsselt anscheinend deine Dateien",
+            "seems to encrypt your files",
+        ),
+        "decoy" => tr("hat eine Köderdatei verändert", "changed a decoy file"),
         _ => tr("auffälliger Inhalt", "suspicious content"),
     }
 }
@@ -122,6 +128,10 @@ pub fn rule_label(rule: &str) -> &'static str {
 pub fn event_title(ev: &Event) -> String {
     let name = display_name(&ev.path);
     match (ev.kind, ev.change) {
+        (Kind::Ransomware, _) => format!(
+            "{}: {name}",
+            tr("Verschlüsselt deine Dateien", "Encrypting your files")
+        ),
         (Kind::TempExec, _) if ev.severity == crate::model::Severity::Malicious => {
             format!(
                 "{}: {name}",
@@ -211,6 +221,10 @@ pub fn event_sentence(ev: &Event) -> &'static str {
         (Kind::Privileges, _) => tr(
             "Rechte für sudo, polkit oder die Anmeldung (PAM) wurden geändert.",
             "Rights for sudo, polkit or login (PAM) were changed.",
+        ),
+        (Kind::Ransomware, _) => tr(
+            "Ein Programm verschlüsselt anscheinend deine Dateien. Es wurde angehalten und wartet auf deine Entscheidung. „Entfernen“ beendet es.",
+            "A program seems to be encrypting your files. It was stopped and waits for your decision. \"Remove\" ends it.",
         ),
         (Kind::TempExec, _) => tr(
             "Ein Programm wurde aus einem temporären Ordner gestartet. Schadsoftware nutzt solche Orte gern.",

@@ -8,8 +8,9 @@
 //  - Program starts: execve/execveat record the file name and the first arguments on entry and
 //    report them on a successful return. This sees scripts run through an interpreter and
 //    programs started from memory (memfd), which fanotify does not.
-//  - Writes: openat/open with write intent, rename, symlink and link report the target path and
-//    the process, so the daemon can say which program changed a persistence entry.
+//  - Writes: openat/open with write intent, rename, symlink, link and unlink report the target
+//    path and the process, so the daemon can say which program changed a persistence entry and
+//    notice a process that encrypts many files. Renames also carry the old name.
 //
 // Filtering by path happens in user space.
 
@@ -48,6 +49,9 @@ static void (*bpf_ringbuf_submit)(void *data, __u64 flags) = (void *)BPF_FUNC_ri
 #define OP_RENAME 1
 #define OP_SYMLINK 2
 #define OP_LINK 3
+#define OP_UNLINK 4
+
+#define AT_REMOVEDIR 0x200
 
 // Must match `RawEvent` in src/ebpf.rs.
 struct event {
@@ -170,23 +174,53 @@ int execveat_exit(struct sys_exit *ctx) {
 #define O_CREAT 0100
 #define O_TRUNC 01000
 
-static __always_inline int write_event(const char *path, __s32 dirfd, __u32 flags, __u32 op) {
+// Package managers running as root write thousands of files that are checked by package
+// verification anyway; their events are not sent at all.
+static __always_inline int is_package_manager(const char *comm) {
+    if (comm[0] == 'r' && comm[1] == 'p' && comm[2] == 'm')
+        return 1; // rpm, rpmkeys, rpm-ostree
+    if (comm[0] == 'd' && comm[1] == 'n' && comm[2] == 'f' && (comm[3] == 0 || comm[3] == '5'))
+        return 1;
+    if (comm[0] == 'd' && comm[1] == 'p' && comm[2] == 'k' && comm[3] == 'g')
+        return 1;
+    if (comm[0] == 'p' && comm[1] == 'a' && comm[2] == 'c' && comm[3] == 'k' && comm[4] == 'a' &&
+        comm[5] == 'g' && comm[6] == 'e' && comm[7] == 'k')
+        return 1; // packagekitd
+    return 0;
+}
+
+// `old` (may be null) is the old name of a rename, relative to `olddirfd`, which goes into
+// `flags`.
+static __always_inline int write_event2(const char *path, __s32 dirfd, __u32 flags, __u32 op,
+                                        const char *old) {
+    __u64 uidgid = bpf_get_current_uid_gid();
+    char comm[16];
+    bpf_get_current_comm(comm, sizeof(comm));
+    if ((__u32)uidgid == 0 && is_package_manager(comm))
+        return 0;
     struct event *e = bpf_ringbuf_reserve(&EVENTS, sizeof(struct event), 0);
     if (!e)
         return 0;
     __u64 id = bpf_get_current_pid_tgid();
     e->kind = KIND_WRITE;
     e->pid = id >> 32;
-    e->uid = (__u32)bpf_get_current_uid_gid();
+    e->uid = (__u32)uidgid;
     e->dirfd = dirfd;
     e->flags = flags;
     e->op = op;
-    bpf_get_current_comm(e->comm, sizeof(e->comm));
+    __builtin_memcpy(e->comm, comm, sizeof(comm));
     if (bpf_probe_read_user_str(e->path, PATH_LEN, path) < 0)
         e->path[0] = 0;
     e->args[0][0] = 0;
+    if (old && bpf_probe_read_user_str(e->args[0], ARG_LEN, old) < 0)
+        e->args[0][0] = 0;
+    e->args[1][0] = 0;
     bpf_ringbuf_submit(e, 0);
     return 0;
+}
+
+static __always_inline int write_event(const char *path, __s32 dirfd, __u32 flags, __u32 op) {
+    return write_event2(path, dirfd, flags, op, 0);
 }
 
 static __always_inline int writes(__u32 flags) {
@@ -211,17 +245,20 @@ int open_enter(struct sys_enter *ctx) {
 
 SEC("tracepoint/syscalls/sys_enter_renameat2")
 int renameat2_enter(struct sys_enter *ctx) {
-    return write_event((const char *)ctx->args[3], (__s32)ctx->args[2], 0, OP_RENAME);
+    return write_event2((const char *)ctx->args[3], (__s32)ctx->args[2], (__u32)ctx->args[0],
+                        OP_RENAME, (const char *)ctx->args[1]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_renameat")
 int renameat_enter(struct sys_enter *ctx) {
-    return write_event((const char *)ctx->args[3], (__s32)ctx->args[2], 0, OP_RENAME);
+    return write_event2((const char *)ctx->args[3], (__s32)ctx->args[2], (__u32)ctx->args[0],
+                        OP_RENAME, (const char *)ctx->args[1]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_rename")
 int rename_enter(struct sys_enter *ctx) {
-    return write_event((const char *)ctx->args[1], -100, 0, OP_RENAME);
+    return write_event2((const char *)ctx->args[1], -100, (__u32)-100, OP_RENAME,
+                        (const char *)ctx->args[0]);
 }
 
 SEC("tracepoint/syscalls/sys_enter_symlinkat")
@@ -237,6 +274,18 @@ int symlink_enter(struct sys_enter *ctx) {
 SEC("tracepoint/syscalls/sys_enter_linkat")
 int linkat_enter(struct sys_enter *ctx) {
     return write_event((const char *)ctx->args[3], (__s32)ctx->args[2], 0, OP_LINK);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlinkat")
+int unlinkat_enter(struct sys_enter *ctx) {
+    if ((__u32)ctx->args[2] & AT_REMOVEDIR)
+        return 0;
+    return write_event((const char *)ctx->args[1], (__s32)ctx->args[0], 0, OP_UNLINK);
+}
+
+SEC("tracepoint/syscalls/sys_enter_unlink")
+int unlink_enter(struct sys_enter *ctx) {
+    return write_event((const char *)ctx->args[0], -100, 0, OP_UNLINK);
 }
 
 char LICENSE[] SEC("license") = "GPL";

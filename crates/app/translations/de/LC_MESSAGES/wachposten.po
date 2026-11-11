@@ -194,3 +194,39 @@ msgstr "Skripte, Programme aus dem Speicher, wer was ändert"
 
 msgid "watched with eBPF"
 msgstr "überwacht mit eBPF"
+
+msgid "Ransomware decoys"
+msgstr "Köderdateien gegen Erpressungs-Software"
+
+msgid "Small documents in your documents, pictures, desktop and download folders that nobody opens. The system daemon stops any program that changes one. Some ransomware skips hidden files, so visible decoys catch more."
+msgstr "Kleine Dokumente in deinen Ordnern Dokumente, Bilder, Schreibtisch und Downloads, die niemand öffnet. Der Systemdienst hält jedes Programm an, das eines davon verändert. Manche Erpressungs-Software überspringt versteckte Dateien, sichtbare Köder fangen also mehr."
+
+msgid "Off"
+msgstr "Aus"
+
+msgid "Visible files"
+msgstr "Sichtbare Dateien"
+
+msgid "Hidden files"
+msgstr "Versteckte Dateien"
+
+msgid "Ransomware"
+msgstr "Erpressungs-Software"
+
+msgid "watched, with decoy files; such programs are stopped"
+msgstr "überwacht, mit Köderdateien; solche Programme werden angehalten"
+
+msgid "watched; such programs are stopped"
+msgstr "überwacht; solche Programme werden angehalten"
+
+msgid "Snapshots of /home"
+msgstr "Snapshots von /home"
+
+msgid "taken by {}"
+msgstr "durch {}"
+
+msgid "none – set up snapper for /home, see the README"
+msgstr "keine – richte snapper für /home ein, siehe README"
+
+msgid "none – keep backups of your files"
+msgstr "keine – sichere deine Dateien regelmäßig"

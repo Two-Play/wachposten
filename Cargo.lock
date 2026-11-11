@@ -6590,9 +6590,11 @@ dependencies = [
  "ksni",
  "log",
  "notify-rust",
+ "tempfile",
  "wachposten-core",
  "wachposten-scan",
  "wachposten-watch",
+ "zip",
 ]
 
 [[package]]

@@ -33,10 +33,12 @@ pub enum Kind {
     Privileges,
     /// A program started from a temporary folder.
     TempExec,
+    /// A program that seems to encrypt the person's files; the daemon stopped it.
+    Ransomware,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 13] = [
         Kind::Autostart,
         Kind::SystemdUser,
         Kind::ShellRc,
@@ -49,6 +51,7 @@ impl Kind {
         Kind::Preload,
         Kind::Privileges,
         Kind::TempExec,
+        Kind::Ransomware,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -65,12 +68,19 @@ impl Kind {
             Kind::Preload => "preload",
             Kind::Privileges => "privileges",
             Kind::TempExec => "temp-exec",
+            Kind::Ransomware => "ransomware",
         }
     }
 
     /// Kinds that describe a single file decided on by its hash, not a baseline entry.
     pub fn is_file_report(self) -> bool {
-        matches!(self, Kind::Download | Kind::TempExec)
+        matches!(self, Kind::Download | Kind::TempExec | Kind::Ransomware)
+    }
+
+    /// Kinds that describe a running program, which may have deleted its file or run from
+    /// memory (`/proc/<pid>/exe`).
+    pub fn is_program(self) -> bool {
+        matches!(self, Kind::TempExec | Kind::Ransomware)
     }
 }
 

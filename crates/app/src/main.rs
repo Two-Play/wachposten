@@ -291,6 +291,9 @@ fn system_cmd(command: Command) -> Result<()> {
                 known_hashes,
                 clamav,
                 ebpf,
+                ransomware,
+                home_btrfs,
+                snapshots,
             } = daemon(&Request::Status)?
             {
                 println!("daemon:         running");
@@ -320,6 +323,22 @@ fn system_cmd(command: Command) -> Result<()> {
                         "scripts, memory programs and writers watched"
                     } else {
                         "off"
+                    }
+                );
+                println!(
+                    "ransomware:     {}",
+                    if ransomware {
+                        "watched, such programs are stopped"
+                    } else {
+                        "off"
+                    }
+                );
+                println!(
+                    "snapshots:      {}",
+                    match (&snapshots, home_btrfs) {
+                        (Some(tool), _) => format!("/home by {tool}"),
+                        (None, true) => "none – set up snapper for /home (see README)".into(),
+                        (None, false) => "none – keep backups of your files (see README)".into(),
                     }
                 );
             }

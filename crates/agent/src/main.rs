@@ -1,6 +1,7 @@
 //! `wachposten-agent`: watches the persistence locations in the home directory and asks the
 //! person at the computer about every new or changed entry.
 
+mod decoys;
 mod notify;
 mod tray;
 
@@ -335,6 +336,11 @@ fn main() -> Result<()> {
         );
         Settings::default()
     });
+    match decoys::apply(&config.home, settings.decoys) {
+        Ok(0) => {}
+        Ok(n) => log::info!("{n} decoy files in place"),
+        Err(e) => log::warn!("cannot set up decoy files: {e:#}"),
+    }
     let scanner = Arc::new(MalwareScanner::from_settings(&settings, &config.data_dir));
     if let Some(yara) = &scanner.yara {
         log::info!("YARA-X: {} rules", yara.rule_count());
