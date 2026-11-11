@@ -230,3 +230,68 @@ msgstr "keine – richte snapper für /home ein, siehe README"
 
 msgid "none – keep backups of your files"
 msgstr "keine – sichere deine Dateien regelmäßig"
+
+msgid "Dangerous"
+msgstr "Gefährlich"
+
+msgid "Unusual"
+msgstr "Ungewöhnlich"
+
+msgid "Looks harmless"
+msgstr "Sieht unbedenklich aus"
+
+msgid "Location"
+msgstr "Ort"
+
+msgid "End it"
+msgstr "Beenden"
+
+msgid "Undo"
+msgstr "Rückgängig machen"
+
+msgid "Let it run"
+msgstr "Weiterlaufen lassen"
+
+msgid "Protected"
+msgstr "Geschützt"
+
+msgid "Protection is limited"
+msgstr "Schutz eingeschränkt"
+
+msgid "Needs your attention"
+msgstr "Braucht deine Aufmerksamkeit"
+
+msgid "Please look at it now."
+msgstr "Bitte sieh es dir jetzt an."
+
+msgid "Nothing urgent. Decide when you have time."
+msgstr "Nichts Dringendes. Entscheide, wenn du Zeit hast."
+
+msgid "Neither the agent nor the system daemon is running."
+msgstr "Weder der Agent noch der System-Daemon läuft."
+
+msgid "The agent for your home folder is not running."
+msgstr "Der Agent für deinen persönlichen Ordner läuft nicht."
+
+msgid "The system daemon is not running: system locations, program starts and ransomware are not watched."
+msgstr "Der System-Daemon läuft nicht: Systemstellen, Programmstarts und Erpressungs-Software werden nicht überwacht."
+
+msgid "Your computer is watched. Nothing waits for a decision."
+msgstr "Dein Rechner wird überwacht. Nichts wartet auf eine Entscheidung."
+
+msgid "Recent activity"
+msgstr "Zuletzt"
+
+msgid "Show history"
+msgstr "Verlauf zeigen"
+
+msgid "Changes that wait for your decision. Remove puts the old state back; Allow makes the change the new normal."
+msgstr "Änderungen, die auf deine Entscheidung warten. Entfernen stellt den alten Stand wieder her, Erlauben macht die Änderung zum neuen Normalzustand."
+
+msgid "Everything Wachposten noticed. Changes that looked harmless can still be undone here."
+msgstr "Alles, was Wachposten bemerkt hat. Unbedenklich wirkende Änderungen lassen sich hier noch rückgängig machen."
+
+msgid "{n} dangerous alert"
+msgid_plural "{n} dangerous alerts"
+msgstr[0] "{n} gefährliche Meldung"
+msgstr[1] "{n} gefährliche Meldungen"

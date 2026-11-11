@@ -126,13 +126,23 @@ wachposten --system status
 theme, German or English). A click on the tray icon opens it too, on the alerts page when
 something waits. Pages:
 
-- **Overview** – what is watched, rules, hash list and ClamAV, open alerts
-- **Alerts** – open events of your agent and of the system daemon, with Allow and Remove
-- **History**, **Quarantine** (put back), **Allowed** (revoke an allowed file)
-- **Settings** – downloads, YARA-X, extra rule folders, Auth-Key, online lookup, ClamAV; saving
-  restarts the agent when it runs as a systemd user service
+- **Overview** – one state at the top (all quiet, protection limited, open or dangerous
+  alerts), cards for what is watched and for rules, hash list and ClamAV, recent activity
+- **Alerts** – open events of your agent and of the system daemon, dangerous ones first, with
+  Remove and Allow (End it and Let it run for ransomware)
+- **History** (harmless-looking changes can still be undone), **Quarantine** (put back),
+  **Allowed** (revoke an allowed file)
+- **Settings** – downloads, YARA-X, extra rule folders, ClamAV, decoy files, Auth-Key, online
+  lookup; saving restarts the agent when it runs as a systemd user service
 
 `wachposten window --tab alerts|history|quarantine|allowed|settings` opens a given page.
+
+| Overview | Alerts (dark) |
+|---|---|
+| ![Overview](docs/overview.png) | ![Alerts in the dark scheme](docs/alerts-dark.png) |
+
+The screenshots come from `test/screenshots.sh`, which renders the window with demo data and
+without a display (`wachposten window --screenshot file.png [--dark]`, hidden option).
 
 **ClamAV** is used when a `clamd` socket is found (Fedora, Debian and Arch locations, or
 `[clamav] socket` in the settings). Files are streamed to clamd, so it needs no access to them.
