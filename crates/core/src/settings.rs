@@ -178,11 +178,15 @@ pub fn xdg_download_dir(home: &Path) -> PathBuf {
 /// `XDG_<key>_DIR` from `user-dirs.dirs` (`DOCUMENTS`, `PICTURES`, `DESKTOP`, `DOWNLOAD` …).
 /// `None` if it is not set or points to the home folder itself.
 pub fn xdg_user_dir(home: &Path, key: &str) -> Option<PathBuf> {
-    let file = std::env::var_os("XDG_CONFIG_HOME")
+    let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"))
-        .join("user-dirs.dirs");
-    let text = fs::read_to_string(file).ok()?;
+        .unwrap_or_else(|| home.join(".config"));
+    xdg_user_dir_in(&config, home, key)
+}
+
+/// Like [`xdg_user_dir`], with `user-dirs.dirs` read from `config` (the XDG config folder).
+pub fn xdg_user_dir_in(config: &Path, home: &Path, key: &str) -> Option<PathBuf> {
+    let text = fs::read_to_string(config.join("user-dirs.dirs")).ok()?;
     let prefix = format!("XDG_{key}_DIR=");
     for line in text.lines() {
         if let Some(value) = line.trim().strip_prefix(&prefix) {

@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use wachposten_core::settings::{Decoys, xdg_download_dir, xdg_user_dir};
+use wachposten_core::settings::{Decoys, xdg_user_dir_in};
 
 const VISIBLE: &str = "!wachposten-koeder.docx";
 const HIDDEN: &str = ".wachposten-koeder.docx";
@@ -18,11 +18,18 @@ This file protects against ransomware. Please do not change, rename or delete it
 
 /// Folders that get a decoy: documents, pictures, desktop and downloads, if they exist.
 pub fn folders(home: &Path) -> Vec<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    folders_in(&config, home)
+}
+
+fn folders_in(config: &Path, home: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = ["DOCUMENTS", "PICTURES", "DESKTOP"]
         .iter()
-        .filter_map(|k| xdg_user_dir(home, k))
+        .filter_map(|k| xdg_user_dir_in(config, home, k))
         .collect();
-    dirs.push(xdg_download_dir(home));
+    dirs.push(xdg_user_dir_in(config, home, "DOWNLOAD").unwrap_or_else(|| home.join("Downloads")));
     dirs.sort();
     dirs.dedup();
     dirs.retain(|d| d.is_dir() && d != home);
@@ -65,6 +72,10 @@ fn document() -> Result<Vec<u8>> {
 
 /// Create, rename or remove the decoys to match `mode`. Returns how many exist afterwards.
 pub fn apply(home: &Path, mode: Decoys) -> Result<usize> {
+    apply_in(&folders(home), mode)
+}
+
+fn apply_in(folders: &[PathBuf], mode: Decoys) -> Result<usize> {
     let want = match mode {
         Decoys::Off => None,
         Decoys::Visible => Some(VISIBLE),
@@ -72,7 +83,7 @@ pub fn apply(home: &Path, mode: Decoys) -> Result<usize> {
     };
     let mut doc = None;
     let mut n = 0;
-    for dir in folders(home) {
+    for dir in folders {
         for name in [VISIBLE, HIDDEN] {
             let path = dir.join(name);
             if Some(name) != want && path.is_file() {
@@ -108,14 +119,14 @@ mod tests {
             "XDG_DOCUMENTS_DIR=\"$HOME/Dokumente\"\nXDG_DESKTOP_DIR=\"$HOME/\"\n",
         )
         .unwrap();
-        // Assumes XDG_CONFIG_HOME is not set, as in CI.
-        assert_eq!(apply(h, Decoys::Visible).unwrap(), 2);
+        let dirs = folders_in(&h.join(".config"), h);
+        assert_eq!(apply_in(&dirs, Decoys::Visible).unwrap(), 2);
         let doc = fs::read(h.join("Dokumente").join(VISIBLE)).unwrap();
         assert_eq!(&doc[..4], b"PK\x03\x04");
-        assert_eq!(apply(h, Decoys::Hidden).unwrap(), 2);
+        assert_eq!(apply_in(&dirs, Decoys::Hidden).unwrap(), 2);
         assert!(!h.join("Dokumente").join(VISIBLE).exists());
         assert!(h.join("Downloads").join(HIDDEN).exists());
-        assert_eq!(apply(h, Decoys::Off).unwrap(), 0);
+        assert_eq!(apply_in(&dirs, Decoys::Off).unwrap(), 0);
         assert!(!h.join("Downloads").join(HIDDEN).exists());
     }
 }
