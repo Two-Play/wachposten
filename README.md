@@ -5,8 +5,8 @@
 Wachposten guards a Linux desktop against malware that tries to settle in. Malware on
 Linux has to start again after a reboot or login, and the places it can use for that are few:
 autostart entries, systemd user units, shell startup files, cron, `LD_PRELOAD`, SSH keys.
-Wachposten watches these places and asks the person at the computer about every new or
-changed entry:
+Wachposten watches these places and asks the person at the computer when a new or changed
+entry looks dangerous:
 
 > **New autostart entry** — A program added itself to your autostart.
 > `~/.config/autostart/update.desktop` · ⚠ starts something from a temporary folder
@@ -33,7 +33,14 @@ it all. See [Roadmap](#roadmap).
 | cron | the user's crontab (`crontab -l`, checked every minute) |
 
 On the first start the current state is recorded as the baseline without asking. After that
-every change becomes an event:
+every change becomes an event, checked against rules for typical persistence tricks. How loud
+Wachposten gets depends on what it finds:
+
+| Level | When | What you see |
+|---|---|---|
+| **Question** | known malware; `LD_PRELOAD` or `/etc/ld.so.preload`; downloads piped into a shell; reverse shells; SSH keys with forced commands; autostart entries, units or cron jobs that start something from `/tmp`, `/dev/shm` or `~/.cache` | a message with **Remove / Allow / Later** that stays on screen |
+| **Warning** | weaker signs: programs in hidden folders, embedded interpreter code, base64 blobs, background processes, `chmod +x`; and every new SSH key, sudo rule or library path | a short message; the event waits in the tray and the window until you decide |
+| **Hint** | nothing suspicious (a new alias in `.bashrc`, an app adding itself to autostart) | a short message; the change is accepted, and **Remove** in the history still undoes it |
 
 - **Allow** makes the new version the baseline.
 - **Remove** moves the new version into quarantine and puts the old version back (or deletes a
@@ -42,12 +49,8 @@ every change becomes an event:
 
 Deleted entries are recorded without a question. Changes undone before a decision close the
 event. A decision is refused if the entry changed again after the message was shown, so a
-click never allows something the person did not see.
-
-New lines are checked against rules for typical persistence tricks: `LD_PRELOAD`, downloads
-piped into a shell, embedded interpreter code, base64 blobs, programs in `/tmp`, `/dev/shm`
-or hidden folders, reverse shells, background processes and SSH keys with forced commands.
-A match marks the event as suspicious and the message stays on screen.
+click never allows something the person did not see. A noted change can be undone until the
+entry changes again.
 
 ## Known malware (stage 2)
 

@@ -82,9 +82,19 @@ struct Agent {
 }
 
 impl Agent {
+    /// Tell the person about new or changed events, as loud as each one deserves.
     fn ask(&self, events: &[Event]) {
         for ev in events {
-            notify::ask(&self.guard.config().home, ev, self.tx.clone(), false, true);
+            self.tell(ev, false, true);
+        }
+    }
+
+    fn tell(&self, ev: &Event, system: bool, can_decide: bool) {
+        let home = &self.guard.config().home;
+        if ev.wants_popup() {
+            notify::ask(home, ev, self.tx.clone(), system, can_decide);
+        } else if ev.decidable() {
+            notify::passive(home, ev, self.tx.clone(), system);
         }
     }
 
@@ -131,19 +141,16 @@ impl Agent {
     }
 
     fn remote_event(&mut self, ev: Event, can_decide: bool) -> Result<()> {
+        let key = (ev.id, ev.new_hash().to_string());
         if ev.status != Status::Open {
+            if ev.status == Status::Noted && self.remote_seen.insert(key) {
+                self.tell(&ev, true, can_decide);
+            }
             self.remote.remove(&ev.id);
             return self.refresh();
         }
-        let key = (ev.id, ev.new_hash().to_string());
         if self.remote_seen.insert(key) {
-            notify::ask(
-                &self.guard.config().home,
-                &ev,
-                self.tx.clone(),
-                true,
-                can_decide,
-            );
+            self.tell(&ev, true, can_decide);
         }
         self.remote.insert(ev.id, (ev, can_decide));
         self.refresh()
@@ -215,23 +222,42 @@ impl Agent {
         }
     }
 
+    /// Ask again about open events: questions only for the dangerous ones, a single line for
+    /// the rest that waits in the tray.
     fn show_open(&self) -> Result<()> {
+        let home = &self.guard.config().home;
+        let mut quiet = 0;
         for (ev, can) in self.remote.values() {
-            notify::ask(&self.guard.config().home, ev, self.tx.clone(), true, *can);
+            if ev.wants_popup() {
+                notify::ask(home, ev, self.tx.clone(), true, *can);
+            } else {
+                quiet += 1;
+            }
         }
-        let open = self.guard.store().open_events()?;
-        if open.len() > MAX_STARTUP_QUESTIONS {
+        let (loud, rest): (Vec<Event>, Vec<Event>) = self
+            .guard
+            .store()
+            .open_events()?
+            .into_iter()
+            .partition(Event::wants_popup);
+        quiet += rest.len();
+        let skipped = loud.len().saturating_sub(MAX_STARTUP_QUESTIONS);
+        for ev in &loud[skipped..] {
+            notify::ask(home, ev, self.tx.clone(), false, true);
+        }
+        if quiet + skipped > 0 {
             notify::info(
-                &format!("{} {}", open.len(), tr("offene Meldungen", "open alerts")),
+                &format!(
+                    "{} {}",
+                    quiet + skipped,
+                    tr("offene Meldungen", "open alerts")
+                ),
                 tr(
                     "Die Liste findest du im Tray-Menü oder mit „wachposten events“.",
                     "See the tray menu or run \"wachposten events\".",
                 ),
                 "security-medium",
             );
-            self.ask(&open[open.len() - MAX_STARTUP_QUESTIONS..]);
-        } else {
-            self.ask(&open);
         }
         Ok(())
     }

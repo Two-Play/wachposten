@@ -13,6 +13,8 @@ export struct EventRow {
     when: string,
     can-decide: bool,
     open: bool,
+    // Accepted without a question, but it can still be undone.
+    noted: bool,
 }
 
 export struct EventDetail {
@@ -224,7 +226,7 @@ component EventView inherits VerticalLayout {
                     decide(detail.row.id, detail.row.system, false);
                 }
             }
-            Button {
+            if !detail.row.noted: Button {
                 text: @tr("Allow");
                 clicked => {
                     decide(detail.row.id, detail.row.system, true);

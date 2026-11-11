@@ -240,6 +240,12 @@ impl Store {
         add_column(&conn, "events", "actor", "TEXT")?;
         add_column(&conn, "quarantine", "uid", "INTEGER")?;
         add_column(&conn, "quarantine", "gid", "INTEGER")?;
+        // The state before a noted change, so it can still be undone (hash in `old_hash`).
+        add_column(&conn, "events", "old_type", "TEXT")?;
+        add_column(&conn, "events", "old_mode", "INTEGER")?;
+        add_column(&conn, "events", "old_size", "INTEGER")?;
+        add_column(&conn, "events", "old_content", "BLOB")?;
+        add_column(&conn, "events", "old_link_target", "TEXT")?;
         Ok(Store { conn })
     }
 
@@ -397,6 +403,58 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// A newer change of `path` replaces noted ones: they can no longer be undone on their own.
+    pub fn close_noted(&self, path: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE events SET status = 'accepted' WHERE path = ?1 AND status = 'noted'",
+            [path],
+        )?;
+        Ok(())
+    }
+
+    /// Keep the state an event replaced, so a change accepted without a question can still be
+    /// undone.
+    pub fn set_old_entry(&self, id: i64, entry: Option<&Entry>) -> rusqlite::Result<()> {
+        let (ty, _, mode, size, content, link) = entry_cols(entry);
+        self.conn.execute(
+            "UPDATE events SET old_type = ?2, old_mode = ?3, old_size = ?4, old_content = ?5,
+               old_link_target = ?6 WHERE id = ?1",
+            params![id, ty, mode, size, content, link],
+        )?;
+        Ok(())
+    }
+
+    /// The state an event replaced, as kept by [`Store::set_old_entry`]: `Ok(None)` if it was not
+    /// kept, `Ok(Some(None))` if the entry did not exist before.
+    pub fn old_entry(&self, id: i64) -> rusqlite::Result<Option<Option<Entry>>> {
+        self.conn
+            .query_row(
+                "SELECT old_hash, old_type, old_mode, old_size, old_content, old_link_target
+                 FROM events WHERE id = ?1",
+                [id],
+                |r| {
+                    let hash: String = r.get(0)?;
+                    if hash == crate::model::ABSENT {
+                        return Ok(Some(None));
+                    }
+                    let ty: Option<String> = r.get(1)?;
+                    if ty.is_none() {
+                        return Ok(None);
+                    }
+                    Ok(Some(entry_from_cols((
+                        ty,
+                        Some(hash),
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))))
+                },
+            )
+            .optional()
+            .map(Option::flatten)
     }
 
     /// Note which program made the change an event describes.
