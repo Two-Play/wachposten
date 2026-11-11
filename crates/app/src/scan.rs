@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use notify_rust::{Notification, Timeout, Urgency};
 use wachposten_core::i18n::tr;
+use wachposten_core::{Event, Guard};
 use wachposten_scan::{Detection, MalwareScanner};
 
 /// Folders are walked to this depth; deeper levels are left out.
@@ -99,8 +100,9 @@ pub fn scan_paths_skipping(
     report
 }
 
-/// Show the result as a desktop notification.
-pub fn notify(report: &Report) {
+/// Show the result as a desktop notification. With hits it offers to move the recorded
+/// `events` to quarantine or to show them in the window, and waits for the answer.
+pub fn notify(report: &Report, guard: &mut Guard, events: &[Event]) {
     let mut n = Notification::new();
     n.appname("Wachposten");
     if report.hits.is_empty() {
@@ -121,42 +123,104 @@ pub fn notify(report: &Report) {
             ))
             .icon("security-high")
             .timeout(Timeout::Milliseconds(6000));
-    } else {
-        let mut body: Vec<String> = report
-            .hits
-            .iter()
-            .take(5)
-            .map(|(p, what)| {
-                let name = p.file_name().map_or_else(
-                    || p.display().to_string(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
-                format!("{} – {}", escape(&name), escape(what))
-            })
-            .collect();
-        if report.hits.len() > 5 {
-            body.push(format!(
-                "{} {}",
-                report.hits.len() - 5,
-                tr("weitere", "more")
-            ));
+        if let Err(e) = n.show() {
+            eprintln!("wachposten: cannot show the notification: {e}");
         }
-        body.push(String::new());
-        body.push(
-            tr(
-                "Öffne die Dateien nicht. Lösche sie oder lass sie mit „wachposten scan-file“ erneut prüfen.",
-                "Do not open them. Delete them or check them again with \"wachposten scan-file\".",
-            )
-            .into(),
-        );
-        n.summary(tr("Schadsoftware gefunden", "Malware found"))
-            .body(&body.join("\n"))
-            .icon("security-low")
-            .urgency(Urgency::Critical)
-            .timeout(Timeout::Never);
+        return;
     }
-    if let Err(e) = n.show() {
-        eprintln!("wachposten: cannot show the notification: {e}");
+
+    n.summary(tr("Schadsoftware gefunden", "Malware found"))
+        .body(&hits_body(report, !events.is_empty()))
+        .icon("security-low")
+        .urgency(Urgency::Critical)
+        .timeout(Timeout::Never)
+        .action("default", tr("Anzeigen", "Show"))
+        .action("show", tr("Anzeigen", "Show"));
+    if !events.is_empty() {
+        n.action("quarantine", tr("In Quarantäne", "Quarantine"));
+    }
+    let handle = match n.show() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("wachposten: cannot show the notification: {e}");
+            return;
+        }
+    };
+    let mut chosen = String::new();
+    handle.wait_for_action(|action| chosen = action.to_string());
+    match chosen.as_str() {
+        "quarantine" => quarantine(guard, events),
+        "show" | "default" => open_alerts(),
+        _ => {}
+    }
+}
+
+fn hits_body(report: &Report, recorded: bool) -> String {
+    let mut body: Vec<String> = report
+        .hits
+        .iter()
+        .take(5)
+        .map(|(p, what)| format!("{}\n   {}", escape(&p.display().to_string()), escape(what)))
+        .collect();
+    if report.hits.len() > 5 {
+        body.push(format!(
+            "{} {}",
+            report.hits.len() - 5,
+            tr("weitere", "more")
+        ));
+    }
+    body.push(String::new());
+    body.push(
+        if recorded {
+            tr(
+                "Öffne die Dateien nicht. Sie stehen im Wachposten-Fenster unter Meldungen.",
+                "Do not open them. They are listed in the Wachposten window under Alerts.",
+            )
+        } else {
+            tr("Öffne die Dateien nicht.", "Do not open them.")
+        }
+        .into(),
+    );
+    body.join("\n")
+}
+
+/// Move the files to quarantine and say how it went.
+fn quarantine(guard: &mut Guard, events: &[Event]) {
+    let mut moved = 0;
+    let mut failed = Vec::new();
+    for ev in events {
+        match guard.remove(ev.id, Some(ev.new_hash())) {
+            Ok(_) => moved += 1,
+            Err(e) => failed.push(format!("{}: {e:#}", ev.path)),
+        }
+    }
+    let mut n = Notification::new();
+    n.appname("Wachposten").timeout(Timeout::Milliseconds(8000));
+    if failed.is_empty() {
+        n.summary(tr("In Quarantäne verschoben", "Moved to quarantine"))
+            .body(&format!(
+                "{moved} {}",
+                tr(
+                    "Datei(en). Im Fenster unter Quarantäne kannst du sie wiederherstellen.",
+                    "file(s). You can restore them in the window under Quarantine.",
+                )
+            ))
+            .icon("security-high");
+    } else {
+        n.summary(tr("Nicht alles verschoben", "Not everything was moved"))
+            .body(&escape(&failed.join("\n")))
+            .icon("security-low");
+    }
+    let _ = n.show();
+}
+
+fn open_alerts() {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("wachposten"));
+    if let Err(e) = std::process::Command::new(exe)
+        .args(["window", "--tab", "alerts"])
+        .spawn()
+    {
+        eprintln!("wachposten: cannot open the window: {e}");
     }
 }
 

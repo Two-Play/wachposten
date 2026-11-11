@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -22,7 +22,7 @@ use wachposten_core::i18n::tr;
 use wachposten_core::ipc::{self, Decision, Reply, Request};
 use wachposten_core::settings::{DAEMON_SETTINGS, DaemonSettings, ExecPopup, RansomAction};
 use wachposten_core::{Config, Event, FileReport, Finding, Guard, Kind, Outcome, Severity, Status};
-use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, hash_db_path};
+use wachposten_scan::{ClamState, HashDb, MalwareScanner, YaraEngine, hash_db_path};
 
 use crate::exec::{ExecReport, ExecStatus};
 use crate::server::Client;
@@ -75,6 +75,7 @@ struct Daemon {
     ticks: u64,
     writers: ebpf::SharedWriters,
     ebpf: bool,
+    last_clamav_recheck: Option<Instant>,
 }
 
 fn can_see(ev: &Event, uid: u32, admin: bool) -> bool {
@@ -503,11 +504,8 @@ impl Daemon {
                         .as_ref()
                         .and_then(|h| h.count().ok())
                         .unwrap_or(0),
-                    clamav: self
-                        .scanner
-                        .clamav
-                        .as_ref()
-                        .is_some_and(|c| c.ping().is_ok()),
+                    clamav: self.scanner.clamav_state() == ClamState::Running,
+                    clamav_state: self.scanner.clamav_state().as_str().to_string(),
                     ebpf: self.ebpf,
                     ransomware: self.ebpf && self.settings.ransomware.enabled,
                     home_btrfs: snapshots.0,
@@ -528,6 +526,19 @@ impl Daemon {
                                 .flatten()
                         })
                         .collect(),
+                }
+            }
+            Request::RecheckClamav => {
+                // A ping to clamd; cheap, but not more often than every few seconds.
+                if self
+                    .last_clamav_recheck
+                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
+                {
+                    self.last_clamav_recheck = Some(Instant::now());
+                    self.scanner.recheck_clamav();
+                }
+                Reply::Done {
+                    message: self.scanner.clamav_state().as_str().to_string(),
                 }
             }
             Request::Allowlist => Reply::Allowlist {
@@ -730,6 +741,7 @@ fn main() -> Result<()> {
     if let Some(key) = settings.hashes.malwarebazaar_auth_key.clone() {
         wachposten_scan::spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
     }
+    wachposten_scan::spawn_clamav_rechecks(scanner.clone());
 
     server::listen(&args.socket, settings.admin_groups.clone(), tx.clone())?;
 
@@ -754,6 +766,7 @@ fn main() -> Result<()> {
         ticks: 0,
         writers,
         ebpf: ebpf_on,
+        last_clamav_recheck: None,
     };
     daemon.rescan()?;
     log::info!("listening on {}", args.socket.display());

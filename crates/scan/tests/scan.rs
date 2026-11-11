@@ -7,7 +7,7 @@ use std::sync::Arc;
 use wachposten_core::crontab::NoCrontab;
 use wachposten_core::{Config, Guard, Kind, Outcome, Severity, Status};
 use wachposten_scan::hashdb::KnownHash;
-use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, sha256_file};
+use wachposten_scan::{ClamState, HashDb, MalwareScanner, YaraEngine, sha256_file};
 
 const TEST_SIGNATURE: &str = "WACHPOSTEN-TEST-SIGNATURE-7f3a9c2e-NOT-MALWARE";
 
@@ -194,6 +194,67 @@ fn hash_list_flags_download_and_decisions_work() {
             .record_detection(&invoice, &findings)
             .unwrap()
             .is_none()
+    );
+}
+
+#[test]
+fn checked_file_becomes_an_alert_and_can_be_quarantined() {
+    let home = tempfile::tempdir().unwrap();
+    let (mut guard, scanner) = guard_with_scanner(home.path());
+    let file = home.path().join("Dokumente/rechnung.sh");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, TEST_SIGNATURE).unwrap();
+    let findings = wachposten_core::FileScanner::scan(scanner.as_ref(), &file);
+    let ev = guard.record_checked(&file, &findings).unwrap().unwrap();
+    assert_eq!(ev.kind, Kind::Checked);
+    assert_eq!(ev.severity, Severity::Malicious);
+    assert!(ev.decidable());
+    // A second check of the same file keeps the one alert.
+    assert!(guard.record_checked(&file, &findings).unwrap().is_none());
+    assert_eq!(guard.store().open_events().unwrap().len(), 1);
+    assert!(matches!(
+        guard.remove(ev.id, Some(ev.new_hash())).unwrap(),
+        Outcome::Removed {
+            quarantine_id: Some(_)
+        }
+    ));
+    assert!(!file.exists());
+}
+
+#[test]
+fn clamav_found_when_clamd_starts_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("clamd.sock");
+    let settings = wachposten_core::settings::ClamAvSettings {
+        enabled: true,
+        socket: Some(socket.clone()),
+        max_scan_mb: 10,
+    };
+    let scanner = MalwareScanner::new(None, None, None, 1).with_clamav(&settings);
+    assert_ne!(scanner.clamav_state(), ClamState::Running);
+
+    // A minimal clamd that answers PING.
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        for mut s in listener.incoming().flatten() {
+            let mut b = [0u8; 6];
+            if s.read_exact(&mut b).is_ok() && &b == b"zPING\0" {
+                let _ = s.write_all(b"PONG\0");
+            }
+        }
+    });
+    assert_eq!(scanner.recheck_clamav(), ClamState::Running);
+    assert_eq!(scanner.clamav_state(), ClamState::Running);
+
+    let off = wachposten_core::settings::ClamAvSettings {
+        enabled: false,
+        ..settings
+    };
+    assert_eq!(MalwareScanner::probe_clamav(&off), ClamState::Off);
+    assert_eq!(
+        ClamState::parse(ClamState::NotRunning.as_str()),
+        ClamState::NotRunning
     );
 }
 

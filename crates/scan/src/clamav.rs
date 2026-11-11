@@ -19,6 +19,32 @@ pub const DEFAULT_SOCKETS: [&str; 4] = [
 
 const CHUNK: usize = 64 * 1024;
 
+/// Where the clamd program lies in the packages of Fedora, Debian/Ubuntu and Arch.
+const PROGRAMS: [&str; 3] = ["/usr/sbin/clamd", "/usr/bin/clamd", "/usr/local/sbin/clamd"];
+
+/// Whether clamd is installed, running or not.
+pub fn installed() -> bool {
+    PROGRAMS.iter().any(|p| Path::new(p).exists())
+}
+
+/// Shell commands that set up and start clamd on this distribution, for the person to run.
+pub fn setup_commands() -> &'static str {
+    setup_commands_for(
+        Path::new("/etc/clamd.d/scan.conf").exists() || Path::new("/etc/fedora-release").exists(),
+    )
+}
+
+fn setup_commands_for(fedora: bool) -> &'static str {
+    if fedora {
+        // Fedora ships the socket line commented out and no signatures.
+        "sudo sed -i '0,/^#LocalSocket /s//LocalSocket /' /etc/clamd.d/scan.conf\n\
+         sudo freshclam\n\
+         sudo systemctl enable --now clamav-freshclam clamd@scan"
+    } else {
+        "sudo freshclam\nsudo systemctl enable --now clamav-freshclam clamav-daemon"
+    }
+}
+
 pub struct ClamAv {
     socket: PathBuf,
     max_bytes: u64,
@@ -153,6 +179,14 @@ mod tests {
             Some("Win.Test.EICAR_HDB-1")
         );
         assert!(parse_reply("INSTREAM size limit exceeded. ERROR").is_err());
+    }
+
+    #[test]
+    fn setup_commands_fit_the_distribution() {
+        let fedora = setup_commands_for(true);
+        assert!(fedora.contains("/etc/clamd.d/scan.conf") && fedora.contains("clamd@scan"));
+        assert_eq!(fedora.lines().count(), 3);
+        assert!(setup_commands_for(false).contains("clamav-daemon"));
     }
 
     #[test]

@@ -372,12 +372,26 @@ impl Guard {
     /// Record a file in a download folder that a malware scanner flagged. Returns the event if
     /// it is new; files the person allowed before and repeats are ignored.
     pub fn record_detection(&mut self, path: &Path, findings: &[Finding]) -> Result<Option<Event>> {
+        self.record_flagged(path, Kind::Download, findings)
+    }
+
+    /// Like [`record_detection`](Self::record_detection) for a file the person had checked.
+    pub fn record_checked(&mut self, path: &Path, findings: &[Finding]) -> Result<Option<Event>> {
+        self.record_flagged(path, Kind::Checked, findings)
+    }
+
+    fn record_flagged(
+        &mut self,
+        path: &Path,
+        kind: Kind,
+        findings: &[Finding],
+    ) -> Result<Option<Event>> {
         if findings.is_empty() {
             return Ok(None);
         }
         self.record_file(&FileReport {
             path,
-            kind: Kind::Download,
+            kind,
             severity: severity_for(findings),
             ask: true,
             findings,
@@ -439,7 +453,7 @@ impl Guard {
     /// stay open: malware often deletes itself after starting, and its process may still run.
     fn prune_downloads(&mut self) -> Result<()> {
         for ev in self.store.open_events()? {
-            if ev.kind != Kind::Download {
+            if !matches!(ev.kind, Kind::Download | Kind::Checked) {
                 continue;
             }
             let current = targets::read_entry(Path::new(&ev.path)).ok().flatten();

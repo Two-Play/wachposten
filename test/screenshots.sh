@@ -23,7 +23,9 @@ printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample laptop\n' > "$D/.ssh/author
 $W scan >/dev/null
 mkdir -p "$ROOT/docs"
 $W window --tab overview --screenshot "$ROOT/docs/overview.png"
+$W window --tab overview --screenshot "$ROOT/docs/overview-dark.png" --dark
 $W window --tab alerts --screenshot "$ROOT/docs/alerts.png"
 $W window --tab alerts --screenshot "$ROOT/docs/alerts-dark.png" --dark
+$W window --tab history --screenshot "$ROOT/docs/history.png"
 $W window --tab settings --screenshot "$ROOT/docs/settings.png"
 echo "screenshots in $ROOT/docs"

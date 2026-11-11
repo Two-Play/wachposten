@@ -142,8 +142,6 @@ msgstr "leer, erste Aktualisierung steht aus"
 msgid "in use for Windows files, Office, PDF and archives"
 msgstr "im Einsatz für Windows-Dateien, Office, PDF und Archive"
 
-msgid "not available – install and start clamd to use it"
-msgstr "nicht verfügbar – installiere und starte clamd"
 
 msgid "not watched"
 msgstr "nicht überwacht"
@@ -304,3 +302,21 @@ msgstr "Exportieren (CSV)"
 
 msgid "Weekly report as a notification"
 msgstr "Wochenbericht als Benachrichtigung"
+
+msgid "Check again"
+msgstr "Erneut prüfen"
+
+msgid "installed, but clamd does not run yet"
+msgstr "installiert, aber clamd läuft noch nicht"
+
+msgid "switched off in Settings"
+msgstr "in den Einstellungen ausgeschaltet"
+
+msgid "not installed (optional)"
+msgstr "nicht installiert (optional)"
+
+msgid "clamd is installed but does not answer. On most systems it needs virus signatures and has to be started once. In a terminal:"
+msgstr "clamd ist installiert, antwortet aber nicht. Meist fehlen noch die Virensignaturen und der Dienst muss einmal gestartet werden. Im Terminal:"
+
+msgid "Then press \"Check again\". Wachposten also looks for clamd by itself every minute."
+msgstr "Danach „Erneut prüfen“ drücken. Wachposten sucht clamd außerdem jede Minute von selbst."

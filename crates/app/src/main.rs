@@ -376,6 +376,7 @@ fn system_cmd(command: Command) -> Result<()> {
                 yara_rules,
                 known_hashes,
                 clamav,
+                clamav_state,
                 ebpf,
                 ransomware,
                 home_btrfs,
@@ -401,8 +402,19 @@ fn system_cmd(command: Command) -> Result<()> {
                 println!("known hashes:   {known_hashes}");
                 println!(
                     "ClamAV:         {}",
-                    if clamav { "in use" } else { "not available" }
+                    match (clamav, clamav_state.as_str()) {
+                        (true, _) => "in use",
+                        (false, "not-running") =>
+                            "installed, but clamd does not answer; to set it up:",
+                        (false, "off") => "switched off",
+                        (false, _) => "not installed (optional)",
+                    }
                 );
+                if !clamav && clamav_state == "not-running" {
+                    for line in wachposten_scan::clamav::setup_commands().lines() {
+                        println!("                  {}", line.trim());
+                    }
+                }
                 println!(
                     "eBPF:           {}",
                     if ebpf {
@@ -581,7 +593,13 @@ fn main() -> Result<()> {
             } else {
                 (paths, Vec::new())
             };
+            let mut flagged = Vec::new();
+            let mut flagged_paths = Vec::new();
             let report = scan::scan_paths_skipping(&scanner, &paths, &skip, |path, detections| {
+                if !detections.is_empty() {
+                    flagged.push(wachposten_scan::findings(path, detections.to_vec()));
+                    flagged_paths.push(path.to_path_buf());
+                }
                 if detections.is_empty() {
                     if !notify {
                         println!("clean     {}", clean(&path.display().to_string()));
@@ -596,8 +614,23 @@ fn main() -> Result<()> {
                     }
                 }
             });
+            // Each hit becomes an alert with Remove and Allow, like a flagged download.
+            let mut events = Vec::new();
+            for (path, findings) in flagged_paths.iter().zip(&flagged) {
+                match guard.record_checked(path, findings) {
+                    Ok(Some(ev)) => events.push(ev),
+                    // Already an open alert from an earlier check, or allowed by the person.
+                    Ok(None) => {
+                        if let Ok(Some(ev)) = guard.store().open_event_for(&path.to_string_lossy())
+                        {
+                            events.push(ev);
+                        }
+                    }
+                    Err(e) => eprintln!("wachposten: cannot record {}: {e:#}", path.display()),
+                }
+            }
             if notify {
-                scan::notify(&report);
+                scan::notify(&report, &mut guard, &events);
             } else if report.skipped > 0 {
                 println!("({} files could not be read)", report.skipped);
             }

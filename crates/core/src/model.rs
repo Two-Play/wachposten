@@ -44,10 +44,13 @@ pub enum Kind {
     DevTools,
     /// Hooks of package managers, run as root on every install.
     Hooks,
+    /// A file the person had checked (file manager menu, `wachposten scan-file`) that matched
+    /// a malware signature or hash.
+    Checked,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 17] = [
+    pub const ALL: [Kind; 18] = [
         Kind::Autostart,
         Kind::SystemdUser,
         Kind::ShellRc,
@@ -65,6 +68,7 @@ impl Kind {
         Kind::Browser,
         Kind::DevTools,
         Kind::Hooks,
+        Kind::Checked,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -86,12 +90,16 @@ impl Kind {
             Kind::Browser => "browser",
             Kind::DevTools => "dev-tools",
             Kind::Hooks => "hooks",
+            Kind::Checked => "checked",
         }
     }
 
     /// Kinds that describe a single file decided on by its hash, not a baseline entry.
     pub fn is_file_report(self) -> bool {
-        matches!(self, Kind::Download | Kind::TempExec | Kind::Ransomware)
+        matches!(
+            self,
+            Kind::Download | Kind::Checked | Kind::TempExec | Kind::Ransomware
+        )
     }
 
     /// Kinds that describe a running program, which may have deleted its file or run from

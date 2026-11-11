@@ -48,6 +48,7 @@ pub fn kind_label(kind: Kind) -> &'static str {
         Kind::Ssh => tr("SSH-Zugang", "SSH access"),
         Kind::Crontab => tr("Zeitgesteuerte Aufgabe (cron)", "scheduled task (cron)"),
         Kind::Download => tr("Download", "download"),
+        Kind::Checked => tr("Geprüfte Datei", "checked file"),
         Kind::SystemdSystem => tr("Systemdienst / Systemstart", "system service / boot"),
         Kind::Preload => tr("Bibliotheken laden", "library loading"),
         Kind::Privileges => tr(
@@ -172,6 +173,7 @@ pub fn event_title(ev: &Event) -> String {
             "{}: {name}",
             tr("Schadsoftware erkannt", "Malware detected")
         ),
+        (Kind::Checked, _) => format!("{}: {name}", tr("Schadsoftware gefunden", "Malware found")),
         (Kind::Autostart, Change::Created) => {
             tr("Neuer Autostart-Eintrag", "New autostart entry").into()
         }
@@ -252,6 +254,10 @@ pub fn event_sentence(ev: &Event) -> &'static str {
         (Kind::Download, _) => tr(
             "Eine heruntergeladene Datei ist als Schadsoftware bekannt. Öffne sie nicht.",
             "A downloaded file is known malware. Do not open it.",
+        ),
+        (Kind::Checked, _) => tr(
+            "Beim Prüfen wurde diese Datei als Schadsoftware erkannt. Öffne sie nicht. Entfernen verschiebt sie in die Quarantäne.",
+            "The check found this file to be malware. Do not open it. Remove moves it to quarantine.",
         ),
         (Kind::SystemdSystem, _) => tr(
             "Etwas soll beim Systemstart oder als Systemdienst mit Root-Rechten laufen.",
