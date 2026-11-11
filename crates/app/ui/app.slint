@@ -723,17 +723,20 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding: 22px;
                             spacing: 18px;
-                            Rectangle {
-                                width: 56px;
-                                height: 56px;
-                                y: (parent.height - self.height) / 2;
-                                border-radius: 28px;
-                                background: root.state-color;
-                                Icon {
-                                    source: root.state == "ok" ? @image-url("icons/check.svg") : @image-url("icons/alert.svg");
-                                    width: 30px;
-                                    height: 30px;
-                                    tint: white;
+                            // A layout ignores `y`, so the icon gets its own centered column.
+                            VerticalLayout {
+                                alignment: center;
+                                Rectangle {
+                                    width: 56px;
+                                    height: 56px;
+                                    border-radius: 28px;
+                                    background: root.state-color;
+                                    Icon {
+                                        source: root.state == "ok" ? @image-url("icons/check.svg") : @image-url("icons/alert.svg");
+                                        width: 30px;
+                                        height: 30px;
+                                        tint: white;
+                                    }
                                 }
                             }
                             VerticalLayout {
