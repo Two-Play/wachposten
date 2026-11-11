@@ -92,6 +92,15 @@ pub enum Reply {
         clamav: bool,
         #[serde(default)]
         ebpf: bool,
+        /// The ransomware check runs.
+        #[serde(default)]
+        ransomware: bool,
+        /// `/home` lies on btrfs.
+        #[serde(default)]
+        home_btrfs: bool,
+        /// The tool that takes snapshots of `/home`, if any.
+        #[serde(default)]
+        snapshots: Option<String>,
     },
     Quarantine {
         items: Vec<QuarantineItem>,

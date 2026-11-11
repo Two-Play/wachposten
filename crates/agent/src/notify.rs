@@ -68,7 +68,12 @@ pub fn body(home: &Path, ev: &Event) -> String {
     }
     if ev.kind.is_file_report() {
         // Details about the process, not file lines.
-        for line in ev.added_lines.iter().take(4) {
+        let n = if ev.kind == wachposten_core::Kind::Ransomware {
+            7
+        } else {
+            4
+        };
+        for line in ev.added_lines.iter().take(n) {
             out.push(escape(&shorten(line)));
         }
     } else if !ev.added_lines.is_empty() {
@@ -124,7 +129,11 @@ pub fn ask(home: &Path, ev: &Event, tx: Sender<Msg>, system: bool, can_decide: b
         .summary(&summary)
         .body(&text)
         .timeout(Timeout::Never);
-    if can_decide {
+    if can_decide && ev.kind == wachposten_core::Kind::Ransomware {
+        n.action("remove", tr("Beenden", "End it"))
+            .action("allow", tr("Weiterlaufen lassen", "Let it run"))
+            .action("later", i18n::action_later());
+    } else if can_decide {
         n.action("remove", i18n::action_remove())
             .action("allow", i18n::action_allow())
             .action("later", i18n::action_later());

@@ -30,3 +30,14 @@ online_lookup = false
 enabled = true
 # socket = "/run/clamd.scan/clamd.sock"
 max_scan_mb = 100
+
+[ransomware]
+# Needs the eBPF part. A process that changes this many files in home folders within the
+# window has the files it wrote last checked; if they look encrypted, it is stopped.
+enabled = true
+files = 25
+window_secs = 20
+# "stop": stop it (SIGSTOP) until someone decides; "report": only ask.
+action = "stop"
+# Programs or scripts that are never stopped, such as a backup tool.
+ignore = []

@@ -15,6 +15,21 @@ pub struct Settings {
     pub yara: Yara,
     pub hashes: Hashes,
     pub clamav: ClamAvSettings,
+    /// Decoy files for the ransomware check of the system daemon.
+    pub decoys: Decoys,
+}
+
+/// Decoy files in the document, picture, desktop and download folders. Ransomware that
+/// changes one is stopped right away.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum Decoys {
+    #[default]
+    Off,
+    /// Visible files: some ransomware skips hidden files.
+    Visible,
+    /// Hidden files (name starts with a dot): not seen in the file manager.
+    Hidden,
 }
 
 /// ClamAV through a running clamd, for Windows programs, Office files, PDFs and archives.
@@ -86,6 +101,7 @@ impl Default for Settings {
                 online_lookup: false,
             },
             clamav: ClamAvSettings::default(),
+            decoys: Decoys::Off,
         }
     }
 }
@@ -156,25 +172,35 @@ impl Settings {
 
 /// `XDG_DOWNLOAD_DIR` from `user-dirs.dirs`, or `~/Downloads`.
 pub fn xdg_download_dir(home: &Path) -> PathBuf {
-    let file = std::env::var_os("XDG_CONFIG_HOME")
+    xdg_user_dir(home, "DOWNLOAD").unwrap_or_else(|| home.join("Downloads"))
+}
+
+/// `XDG_<key>_DIR` from `user-dirs.dirs` (`DOCUMENTS`, `PICTURES`, `DESKTOP`, `DOWNLOAD` …).
+/// `None` if it is not set or points to the home folder itself.
+pub fn xdg_user_dir(home: &Path, key: &str) -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".config"))
-        .join("user-dirs.dirs");
-    if let Ok(text) = fs::read_to_string(file) {
-        for line in text.lines() {
-            if let Some(value) = line.trim().strip_prefix("XDG_DOWNLOAD_DIR=") {
-                let value = value.trim().trim_matches('"');
-                let path = match value.strip_prefix("$HOME") {
-                    Some(rest) => home.join(rest.trim_start_matches('/')),
-                    None => PathBuf::from(value),
-                };
-                if path.is_absolute() && path != home {
-                    return path;
-                }
+        .unwrap_or_else(|| home.join(".config"));
+    xdg_user_dir_in(&config, home, key)
+}
+
+/// Like [`xdg_user_dir`], with `user-dirs.dirs` read from `config` (the XDG config folder).
+pub fn xdg_user_dir_in(config: &Path, home: &Path, key: &str) -> Option<PathBuf> {
+    let text = fs::read_to_string(config.join("user-dirs.dirs")).ok()?;
+    let prefix = format!("XDG_{key}_DIR=");
+    for line in text.lines() {
+        if let Some(value) = line.trim().strip_prefix(&prefix) {
+            let value = value.trim().trim_matches('"');
+            let path = match value.strip_prefix("$HOME") {
+                Some(rest) => home.join(rest.trim_start_matches('/')),
+                None => PathBuf::from(value),
+            };
+            if path.is_absolute() && path != home {
+                return Some(path);
             }
         }
     }
-    home.join("Downloads")
+    None
 }
 
 #[cfg(test)]
@@ -231,6 +257,42 @@ pub struct DaemonSettings {
     pub yara: Yara,
     pub hashes: Hashes,
     pub clamav: ClamAvSettings,
+    pub ransomware: RansomwareSettings,
+}
+
+/// What happens when a process seems to encrypt files.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RansomAction {
+    /// Stop the process (`SIGSTOP`) until someone decides.
+    Stop,
+    /// Only ask; the process keeps running.
+    Report,
+}
+
+/// The ransomware check of the daemon (needs the eBPF part).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct RansomwareSettings {
+    pub enabled: bool,
+    /// Changed files within the window before their content is checked.
+    pub files: usize,
+    pub window_secs: u64,
+    pub action: RansomAction,
+    /// Programs or scripts that are never stopped, such as a backup tool.
+    pub ignore: Vec<PathBuf>,
+}
+
+impl Default for RansomwareSettings {
+    fn default() -> Self {
+        RansomwareSettings {
+            enabled: true,
+            files: 25,
+            window_secs: 20,
+            action: RansomAction::Stop,
+            ignore: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -258,6 +320,7 @@ impl Default for DaemonSettings {
             yara: Yara::default(),
             hashes: Hashes::default(),
             clamav: ClamAvSettings::default(),
+            ransomware: RansomwareSettings::default(),
         }
     }
 }

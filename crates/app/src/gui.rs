@@ -14,6 +14,7 @@ use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use wachposten_core::i18n::{self, Lang, tr};
 use wachposten_core::ipc::{self, Reply, Request};
 use wachposten_core::scanner::MALWARE_RULE;
+use wachposten_core::settings::Decoys;
 use wachposten_core::{Config, Event, Guard, Outcome, Settings, Status};
 use wachposten_scan::{HashDb, YaraEngine, clamav::ClamAv, hash_db_path};
 
@@ -248,6 +249,15 @@ fn load(state: &mut State, ui: &AppWindow) -> Result<()> {
         ),
         _ => (false, false, 0, 0, false, false),
     };
+    let (ransomware, home_btrfs, snapshots) = match &daemon_status {
+        Some(Reply::Status {
+            ransomware,
+            home_btrfs,
+            snapshots,
+            ..
+        }) => (*ransomware, *home_btrfs, snapshots.clone()),
+        _ => (false, false, None),
+    };
     ui.set_status(StatusInfo {
         agent: crate::agent_running(state.guard.config()),
         daemon: daemon_up,
@@ -255,6 +265,10 @@ fn load(state: &mut State, ui: &AppWindow) -> Result<()> {
         exec_watch,
         blocking,
         ebpf,
+        ransomware,
+        home_btrfs,
+        snapshots: snapshots.unwrap_or_default().into(),
+        decoys: settings.decoys != Decoys::Off,
         yara_rules: state.yara_rules.max(sys_rules) as i32,
         known_hashes: local_hashes.max(sys_hashes) as i32,
         hash_updates: settings.hashes.malwarebazaar_auth_key.is_some(),
@@ -364,6 +378,11 @@ fn store_quarantine(state: &State, _system: bool) -> Result<Vec<(i64, Quarantine
 
 fn settings_data(settings: &Settings) -> SettingsData {
     SettingsData {
+        decoys: match settings.decoys {
+            Decoys::Off => 0,
+            Decoys::Visible => 1,
+            Decoys::Hidden => 2,
+        },
         downloads: settings.downloads.enabled,
         yara: settings.yara.enabled,
         rule_dirs: settings
@@ -638,6 +657,11 @@ pub fn run(tab: Option<&str>) -> Result<()> {
                 s.hashes.malwarebazaar_auth_key = (!key.is_empty()).then_some(key);
                 s.hashes.online_lookup = data.online;
                 s.clamav.enabled = data.clamav;
+                s.decoys = match data.decoys {
+                    1 => Decoys::Visible,
+                    2 => Decoys::Hidden,
+                    _ => Decoys::Off,
+                };
                 s.save(&home)?;
                 Ok(restart_agent())
             })();

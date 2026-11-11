@@ -16,7 +16,7 @@ Known malware is recognised in later stages with YARA-X rules and hash lists, an
 be added for Windows files and mail attachments. The core is the persistence and behaviour
 watch, because no maintained open signature database for Linux desktop malware exists.
 
-**Status: all 5 stages built.** The agent watches the home directory and scans downloads; the root
+**Status: all 6 stages built.** The agent watches the home directory and scans downloads; the root
 daemon watches system-wide locations and program starts from temporary folders; a window shows
 it all. See [Roadmap](#roadmap).
 
@@ -169,6 +169,46 @@ sudo dnf install target/rpm/RPMS/x86_64/wachposten-0.1.0-1.*.x86_64.rpm
 sudo systemctl enable --now wachposten-daemon
 ```
 
+## Ransomware (stage 6)
+
+Ransomware does not need to settle in: it encrypts the files and is done. The daemon's eBPF
+part therefore follows every write, rename and deletion in home folders (hidden folders such as
+`~/.cache` and build folders such as `target/` or `node_modules/` aside) and counts them per
+process, and also for its parent, so a script that runs one `gpg` or `openssl` per file is
+caught through the script.
+
+- **Rate, then content.** Only once a process changed 25 files within 20 seconds does the daemon
+  look at the files it wrote last. A `.pdf` that no longer starts with `%PDF`, a `.jpg` without a
+  JPEG header, a `.txt` full of random bytes, or many files renamed to the same new ending
+  (`report.pdf` → `report.pdf.locked`) mean encryption. Copying, unpacking or exporting many
+  files changes nothing about their content and stays quiet.
+- **Decoy files (optional).** In the window under Settings you can let the agent put a small
+  document (`!wachposten-koeder.docx`, or hidden `.wachposten-koeder.docx`) into the
+  documents, pictures, desktop and download folders. A program that changes, renames or deletes
+  one is stopped at once. Visible decoys catch more, since some ransomware skips hidden files.
+- **Stop and ask.** The process, and the other processes of the same program or script, are
+  stopped (`SIGSTOP`), and its owner is asked: **End it** kills them and moves the program or
+  script into quarantine; **Let it run** continues them and remembers the program so it is not
+  stopped again (a decoy hit always asks). Without an answer the processes stay stopped.
+  Programs of the system (`gpg`, `7z`, an interpreter like `python3`) are never quarantined or
+  allowed as a whole; the decision is about that one process. Session processes (`plasmashell`,
+  `gnome-shell`, `Xwayland` …) are only reported.
+- **Settings** in `/etc/wachposten/daemon.toml`, section `[ransomware]`: `files`,
+  `window_secs`, `action = "stop" | "report"`, and `ignore` for programs such as a backup tool.
+
+Detection takes a moment, so a few files (usually fewer than 30) are lost before the process is
+stopped. Only a backup or a snapshot brings them back. The status page therefore shows whether
+snapshots of `/home` are taken (snapper, Timeshift or btrbk). On Fedora, where `/home` is a
+btrfs subvolume, snapper does that:
+
+```bash
+sudo dnf install snapper
+sudo snapper -c home create-config /home
+sudo systemctl enable --now snapper-timeline.timer snapper-cleanup.timer
+```
+
+Snapshots lie on the same disk; they do not replace a backup on another disk.
+
 ## Usage
 
 ```bash
@@ -218,6 +258,9 @@ starts with `de`, English otherwise.
 - Removing an autostart entry does not stop a program that already runs.
 - Archives are not unpacked; only the archive itself is checked. ClamAV (stage 4) covers that.
 - Only the top level of the download folder is watched.
+- The ransomware check needs the eBPF part. Ransomware that encrypts slowly (fewer than 25
+  files in 20 seconds), only files without a recognisable type, or through many unrelated
+  processes is not caught by the rate; decoy files help there.
 
 ## Roadmap
 
@@ -226,6 +269,7 @@ starts with `de`, English otherwise.
 3. **Daemon** – fanotify for program starts from `/tmp`, `/var/tmp`, `/dev/shm`, `~/.cache`; system locations such as `/etc/ld.so.preload`, `/etc/cron*`, `/etc/systemd/system` *(done)*
 4. **Slint window and ClamAV** – history, allowed entries, quarantine, settings; optional ClamAV via `clamd` *(done)*
 5. **eBPF and packages** – process starts through interpreters and `memfd`, which program changed a file, RPM *(done)*
+6. **Ransomware** – mass encryption by rate and content, decoy files, stop and ask, snapshot status *(done)*
 
 ## Development
 

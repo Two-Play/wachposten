@@ -1,6 +1,6 @@
 // Main window of Wachposten. Texts are English and translated with @tr (see translations/).
 
-import { Button, CheckBox, GroupBox, LineEdit, ListView, Palette, ScrollView, Switch, TabWidget, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, GroupBox, LineEdit, ListView, Palette, ScrollView, Switch, TabWidget, VerticalBox, HorizontalBox } from "std-widgets.slint";
 
 export struct EventRow {
     id: int,
@@ -51,6 +51,11 @@ export struct StatusInfo {
     exec-watch: bool,
     blocking: bool,
     ebpf: bool,
+    ransomware: bool,
+    home-btrfs: bool,
+    // Tool that takes snapshots of /home, empty if none.
+    snapshots: string,
+    decoys: bool,
     yara-rules: int,
     known-hashes: int,
     hash-updates: bool,
@@ -66,6 +71,8 @@ export struct SettingsData {
     key: string,
     online: bool,
     clamav: bool,
+    // 0 off, 1 visible, 2 hidden
+    decoys: int,
 }
 
 component SeverityBadge inherits Rectangle {
@@ -369,6 +376,16 @@ export component AppWindow inherits Window {
                                     label: @tr("Scripts, memory programs, who changed what");
                                     value: status.ebpf ? @tr("watched with eBPF") : @tr("not watched");
                                 }
+                                StatusLine {
+                                    ok: status.ransomware;
+                                    label: @tr("Ransomware");
+                                    value: !status.ransomware ? @tr("not watched") : status.decoys ? @tr("watched, with decoy files; such programs are stopped") : @tr("watched; such programs are stopped");
+                                }
+                                StatusLine {
+                                    ok: status.snapshots != "";
+                                    label: @tr("Snapshots of /home");
+                                    value: status.snapshots != "" ? @tr("taken by {}", status.snapshots) : status.home-btrfs ? @tr("none – set up snapper for /home, see the README") : @tr("none – keep backups of your files");
+                                }
                             }
                         }
                         GroupBox {
@@ -563,6 +580,23 @@ export component AppWindow inherits Window {
                                     checked: settings.clamav;
                                     toggled => {
                                         settings.clamav = self.checked;
+                                    }
+                                }
+                            }
+                        }
+                        GroupBox {
+                            title: @tr("Ransomware decoys");
+                            VerticalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: @tr("Small documents in your documents, pictures, desktop and download folders that nobody opens. The system daemon stops any program that changes one. Some ransomware skips hidden files, so visible decoys catch more.");
+                                    wrap: word-wrap;
+                                }
+                                ComboBox {
+                                    model: [@tr("Off"), @tr("Visible files"), @tr("Hidden files")];
+                                    current-index: settings.decoys;
+                                    selected => {
+                                        settings.decoys = self.current-index;
                                     }
                                 }
                             }

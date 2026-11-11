@@ -120,6 +120,8 @@ pub struct FileReport<'a> {
     /// Extra lines shown with the event, such as the process that started a program.
     pub details: &'a [String],
     pub uid: Option<u32>,
+    /// Report it even if the person allowed this file before (a changed decoy file).
+    pub even_if_allowed: bool,
 }
 
 pub fn severity_for(findings: &[Finding]) -> Severity {
@@ -380,6 +382,7 @@ impl Guard {
             findings,
             details: &[],
             uid: None,
+            even_if_allowed: false,
         })
     }
 
@@ -394,7 +397,7 @@ impl Guard {
             // Programs and malware are not kept in the database.
             *content = None;
         }
-        if self.store.is_allowed_hash(entry.hash())? {
+        if !report.even_if_allowed && self.store.is_allowed_hash(entry.hash())? {
             return Ok(None);
         }
         let path_str = report.path.to_string_lossy().into_owned();
@@ -466,7 +469,7 @@ impl Guard {
             bail!(DecisionError::Stale);
         }
         let current = self.current_entry(&ev.path)?;
-        let gone_program = ev.kind == Kind::TempExec && current.is_none();
+        let gone_program = ev.kind.is_program() && current.is_none();
         if hash_of(current.as_ref()) != ev.new_hash() && !gone_program {
             bail!(DecisionError::Stale);
         }
@@ -477,8 +480,13 @@ impl Guard {
     pub fn allow(&mut self, id: i64, seen_hash: Option<&str>) -> Result<Outcome> {
         let ev = self.check_decision(id, seen_hash)?;
         self.store.transaction(|s| {
+            // A process without a file of its own (`/proc/<pid>/exe`) may be an interpreter
+            // or a program from memory: allowing it must not allow that program everywhere.
+            let own_file = !(ev.kind == Kind::Ransomware && ev.path.starts_with("/proc/"));
             if ev.kind.is_file_report() {
-                s.allow_hash(ev.new_hash(), &ev.path)?;
+                if own_file {
+                    s.allow_hash(ev.new_hash(), &ev.path)?;
+                }
             } else {
                 s.set_baseline(&ev.path, ev.kind, ev.new_entry.as_ref())?;
             }
@@ -508,7 +516,7 @@ impl Guard {
 
         // The program deleted itself, or ran from memory (/proc/<pid>/exe): there is no file to
         // keep, and the caller ended its processes.
-        if ev.kind == Kind::TempExec
+        if ev.kind.is_program()
             && (fs::symlink_metadata(&ev.path).is_err() || ev.path.starts_with("/proc/"))
         {
             self.store.resolve_event(ev.id, Status::Removed, None)?;

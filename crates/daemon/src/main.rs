@@ -4,6 +4,7 @@
 mod ebpf;
 mod exec;
 mod proc;
+mod ransom;
 mod server;
 mod users;
 
@@ -19,7 +20,7 @@ use anyhow::Result;
 use clap::Parser;
 use wachposten_core::i18n::tr;
 use wachposten_core::ipc::{self, Decision, Reply, Request};
-use wachposten_core::settings::{DAEMON_SETTINGS, DaemonSettings, ExecPopup};
+use wachposten_core::settings::{DAEMON_SETTINGS, DaemonSettings, ExecPopup, RansomAction};
 use wachposten_core::{Config, Event, FileReport, Finding, Guard, Kind, Outcome, Severity, Status};
 use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, hash_db_path};
 
@@ -52,6 +53,8 @@ pub enum Msg {
     Rescan,
     Tick,
     Exec(ExecReport),
+    /// A process seems to encrypt files (from the eBPF part).
+    Ransom(ransom::Alarm),
     Subscribe(Client),
     Request {
         uid: u32,
@@ -79,7 +82,7 @@ fn can_see(ev: &Event, uid: u32, admin: bool) -> bool {
 }
 
 fn can_decide(ev: &Event, uid: u32, admin: bool) -> bool {
-    admin || (ev.kind == Kind::TempExec && ev.uid == Some(uid))
+    admin || (ev.kind.is_program() && ev.uid == Some(uid))
 }
 
 fn shorten(s: &str, n: usize) -> String {
@@ -180,6 +183,121 @@ impl Daemon {
         self.rescan()
     }
 
+    /// Stop a process that seems to encrypt files, together with the other processes of the
+    /// same program or script, and ask its owner.
+    fn ransom(&mut self, alarm: ransom::Alarm) -> Result<()> {
+        let pid = alarm.pid as i32;
+        let info = proc::info(pid);
+        if info.comm.is_empty() {
+            return Ok(()); // already gone
+        }
+        let mut target = proc::target_of(pid);
+        // A program of the system (gpg, openssl, 7z …) is not removed or allowed as a whole:
+        // decide on this one process.
+        if !target.starts_with("/proc") && wachposten_core::pkg::installed_unchanged(&target) {
+            target = PathBuf::from(format!("/proc/{pid}/exe"));
+        }
+        let decoy = matches!(alarm.reason, ransom::Reason::Decoy(_));
+        let cfg = &self.settings.ransomware;
+        if !decoy && cfg.ignore.iter().any(|p| p == &target) {
+            log::info!("ransomware check: {} is ignored", target.display());
+            return Ok(());
+        }
+        let mut pids = vec![pid];
+        if !target.starts_with("/proc") {
+            pids.extend(
+                proc::processes_of(&target)
+                    .into_iter()
+                    .filter(|p| *p != pid),
+            );
+        }
+        let protected = pids.iter().any(|p| proc::is_protected(*p));
+        let stop = cfg.action == RansomAction::Stop && !protected;
+        // Stop first: every second counts. An allowed program is continued right after.
+        if stop {
+            proc::signal_all(&pids, nix::sys::signal::Signal::SIGSTOP);
+        }
+        let mut details = vec![alarm.reason.describe()];
+        details.push(if stop {
+            format!(
+                "{}: {}",
+                tr("Angehalten", "Stopped"),
+                pids.iter()
+                    .map(|p| format!("PID {p}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            tr(
+                "Läuft weiter (nur gemeldet)",
+                "Still running (only reported)",
+            )
+            .to_string()
+        });
+        let mut who = format!(
+            "{} (PID {pid}, {})",
+            info.comm,
+            info.uid.map(users::name).unwrap_or_default()
+        );
+        if !info.cmdline.is_empty() {
+            who.push_str(&format!(" – {}", shorten(&info.cmdline, 160)));
+        }
+        if let (Some(ppid), Some(parent)) = (info.ppid, &info.parent_comm) {
+            who.push_str(&format!(" ← {parent} (PID {ppid})"));
+        }
+        details.push(format!("{}: {who}", tr("Prozess", "Process")));
+        details.push(format!(
+            "{} ({}):",
+            tr("Betroffene Dateien", "Affected files"),
+            alarm.count
+        ));
+        details.extend(
+            alarm
+                .files
+                .iter()
+                .take(5)
+                .map(|f| format!("  {}", f.display())),
+        );
+        let findings = [Finding {
+            rule: if decoy { "decoy" } else { "ransomware" }.into(),
+            line: alarm.reason.describe(),
+        }];
+        let event = self.guard.record_file(&FileReport {
+            path: &target,
+            kind: Kind::Ransomware,
+            severity: Severity::Malicious,
+            ask: true,
+            findings: &findings,
+            details: &details,
+            uid: info.uid,
+            even_if_allowed: decoy,
+        })?;
+        match event {
+            Some(ev) => {
+                log::warn!(
+                    "ransomware {}: {} ({}), stopped: {stop}",
+                    ev.id,
+                    target.display(),
+                    alarm.reason.describe()
+                );
+                self.push(&ev);
+            }
+            None if stop
+                && self
+                    .guard
+                    .store()
+                    .open_event_for(&target.to_string_lossy())?
+                    .is_none() =>
+            {
+                // Allowed before (a backup tool, say): let it go on.
+                log::info!("ransomware check: {} was allowed before", target.display());
+                proc::signal_all(&pids, nix::sys::signal::Signal::SIGCONT);
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
     fn exec(&mut self, report: ExecReport) -> Result<()> {
         // A program started from memory has no folder; it is reported through /proc/<pid>/exe.
         let from_memory = report
@@ -264,6 +382,7 @@ impl Daemon {
             findings: &findings,
             details: &details,
             uid,
+            even_if_allowed: false,
         })?;
         if let Some(ev) = event {
             if ev.status == Status::Open {
@@ -321,31 +440,37 @@ impl Daemon {
             Request::Subscribe => Reply::Error {
                 message: "subscribe on a connection of its own".into(),
             },
-            Request::Status => Reply::Status {
-                baseline: self.guard.store().baseline_count()?,
-                open: self
-                    .guard
-                    .store()
-                    .open_events()?
-                    .iter()
-                    .filter(|e| can_see(e, uid, admin))
-                    .count() as i64,
-                exec_watch: self.exec.watching,
-                blocking: self.exec.blocking,
-                yara_rules: self.scanner.yara.as_ref().map_or(0, YaraEngine::rule_count),
-                known_hashes: self
-                    .scanner
-                    .hashes
-                    .as_ref()
-                    .and_then(|h| h.count().ok())
-                    .unwrap_or(0),
-                clamav: self
-                    .scanner
-                    .clamav
-                    .as_ref()
-                    .is_some_and(|c| c.ping().is_ok()),
-                ebpf: self.ebpf,
-            },
+            Request::Status => {
+                let snapshots = ransom::home_snapshots();
+                Reply::Status {
+                    baseline: self.guard.store().baseline_count()?,
+                    open: self
+                        .guard
+                        .store()
+                        .open_events()?
+                        .iter()
+                        .filter(|e| can_see(e, uid, admin))
+                        .count() as i64,
+                    exec_watch: self.exec.watching,
+                    blocking: self.exec.blocking,
+                    yara_rules: self.scanner.yara.as_ref().map_or(0, YaraEngine::rule_count),
+                    known_hashes: self
+                        .scanner
+                        .hashes
+                        .as_ref()
+                        .and_then(|h| h.count().ok())
+                        .unwrap_or(0),
+                    clamav: self
+                        .scanner
+                        .clamav
+                        .as_ref()
+                        .is_some_and(|c| c.ping().is_ok()),
+                    ebpf: self.ebpf,
+                    ransomware: self.ebpf && self.settings.ransomware.enabled,
+                    home_btrfs: snapshots.0,
+                    snapshots: snapshots.1.map(str::to_string),
+                }
+            }
             Request::WhoWrote { paths } => {
                 let home = users::home(uid);
                 let writers = self.writers.lock().unwrap_or_else(|e| e.into_inner());
@@ -417,9 +542,21 @@ impl Daemon {
                     });
                 }
                 let outcome = match decision {
-                    Decision::Allow => self.guard.allow(id, hash.as_deref())?,
+                    Decision::Allow => {
+                        let outcome = self.guard.allow(id, hash.as_deref())?;
+                        if ev.kind == Kind::Ransomware {
+                            let pids = proc::processes_of(Path::new(&ev.path));
+                            let n = proc::signal_all(&pids, nix::sys::signal::Signal::SIGCONT);
+                            log::info!("continued {n} processes of {}", ev.path);
+                        }
+                        outcome
+                    }
                     Decision::Remove => {
-                        if ev.kind == Kind::TempExec {
+                        if ev.kind == Kind::Ransomware {
+                            let pids = proc::processes_of(Path::new(&ev.path));
+                            let n = proc::signal_all(&pids, nix::sys::signal::Signal::SIGKILL);
+                            log::info!("ended {n} processes of {}", ev.path);
+                        } else if ev.kind == Kind::TempExec {
                             let n = proc::kill_program(Path::new(&ev.path));
                             log::info!("ended {n} processes of {}", ev.path);
                         }
@@ -526,7 +663,15 @@ fn main() -> Result<()> {
     let writers = ebpf::SharedWriters::default();
     let ebpf_on = settings.exec.ebpf
         && !args.no_exec
-        && match ebpf::start(tx.clone(), scanner.clone(), writers.clone()) {
+        && match ebpf::start(
+            tx.clone(),
+            scanner.clone(),
+            writers.clone(),
+            settings.ransomware.enabled.then(|| ransom::Limits {
+                files: settings.ransomware.files.max(5),
+                window: Duration::from_secs(settings.ransomware.window_secs.max(2)),
+            }),
+        ) {
             Ok(()) => true,
             Err(e) => {
                 log::warn!("{e:#}; scripts, memory programs and writers are not watched");
@@ -571,6 +716,7 @@ fn main() -> Result<()> {
             Msg::Rescan => daemon.rescan(),
             Msg::Tick => daemon.tick(),
             Msg::Exec(report) => daemon.exec(report),
+            Msg::Ransom(alarm) => daemon.ransom(alarm),
             Msg::Subscribe(client) => {
                 daemon.subscribe(client);
                 Ok(())
