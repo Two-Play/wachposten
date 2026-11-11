@@ -31,6 +31,10 @@ it all. See [Roadmap](#roadmap).
 | Environment | `~/.config/environment.d/*.conf`, `.pam_environment` |
 | SSH | `authorized_keys`, `authorized_keys2`, `~/.ssh/rc` |
 | cron | the user's crontab (`crontab -l`, checked every minute) |
+| Launchers | `~/.local/share/applications/*.desktop`, `~/.config/mimeapps.list`, Dolphin service menus, Nautilus scripts |
+| Browser | Firefox extensions and `user.js` of every profile (also Flatpak); a new extension always waits for a decision, updates only give a hint |
+| Developer tools | `~/.gitconfig`, `~/.config/git/` (hooks, aliases with `!`, `core.pager` …), `*.pth` in the user's Python `site-packages` (run at every Python start) |
+| systemd extras | user generators, environment generators, `~/.config/systemd/user.conf` |
 
 On the first start the current state is recorded as the baseline without asking. After that
 every change becomes an event, checked against rules for typical persistence tricks. How loud

@@ -32,6 +32,10 @@ pub enum Filter {
     Fish,
     /// systemd unit files, drop-ins and enablement symlinks.
     SystemdUnits,
+    /// `*.pth` (run by Python at every start)
+    Pth,
+    /// `*.json`
+    Json,
 }
 
 #[derive(Debug, Clone)]
@@ -118,7 +122,89 @@ pub fn home_targets(home: &Path, crontab: bool) -> Vec<Target> {
         file(Ssh, ".ssh/rc"),
         dir(ShellRc, ".config/fish/conf.d", false, Filter::Fish),
         file(ShellRc, ".config/fish/config.fish"),
+        dir(
+            SystemdUser,
+            ".config/systemd/user-generators",
+            false,
+            Filter::Any,
+        ),
+        dir(
+            SystemdUser,
+            ".config/systemd/user-environment-generators",
+            false,
+            Filter::Any,
+        ),
+        file(SystemdUser, ".config/systemd/user.conf"),
+        dir(
+            Applications,
+            ".local/share/applications",
+            false,
+            Filter::Desktop,
+        ),
+        file(Applications, ".config/mimeapps.list"),
+        dir(
+            Applications,
+            ".local/share/kio/servicemenus",
+            false,
+            Filter::Desktop,
+        ),
+        dir(
+            Applications,
+            ".local/share/kservices5/ServiceMenus",
+            false,
+            Filter::Desktop,
+        ),
+        dir(
+            Applications,
+            ".local/share/nautilus/scripts",
+            true,
+            Filter::Any,
+        ),
+        file(DevTools, ".gitconfig"),
+        file(DevTools, ".config/git/config"),
+        dir(DevTools, ".config/git/hooks", false, Filter::Any),
     ];
+    // Python runs every .pth file in site-packages at start-up.
+    for site in child_dirs(&home.join(".local/lib"))
+        .into_iter()
+        .filter(|d| {
+            d.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("python"))
+        })
+        .map(|d| d.join("site-packages"))
+    {
+        targets.push(Target {
+            kind: DevTools,
+            path: TargetPath::Dir {
+                path: site,
+                recursive: false,
+                filter: Filter::Pth,
+            },
+        });
+    }
+    // Firefox profiles (also the Flatpak one): installed extensions and user.js.
+    for base in [
+        ".mozilla/firefox",
+        ".var/app/org.mozilla.firefox/.mozilla/firefox",
+    ] {
+        for profile in child_dirs(&home.join(base))
+            .into_iter()
+            .filter(|p| p.join("prefs.js").exists())
+        {
+            targets.push(Target {
+                kind: Browser,
+                path: TargetPath::Dir {
+                    path: profile.join("extensions"),
+                    recursive: false,
+                    filter: Filter::Any,
+                },
+            });
+            targets.push(Target {
+                kind: Browser,
+                path: TargetPath::File(profile.join("user.js")),
+            });
+        }
+    }
     for rc in [
         ".bashrc",
         ".bash_profile",
@@ -198,6 +284,85 @@ pub fn system_targets() -> Vec<Target> {
         dir(Privileges, "/etc/sudoers.d", false, Filter::Any),
         dir(Privileges, "/etc/polkit-1/rules.d", false, Filter::Any),
         dir(Privileges, "/etc/pam.d", false, Filter::Any),
+        dir(
+            SystemdSystem,
+            "/etc/systemd/system-generators",
+            false,
+            Filter::Any,
+        ),
+        dir(
+            SystemdSystem,
+            "/etc/systemd/user-generators",
+            false,
+            Filter::Any,
+        ),
+        dir(SystemdSystem, "/etc/modules-load.d", false, Filter::Conf),
+        dir(SystemdSystem, "/etc/modprobe.d", false, Filter::Conf),
+        dir(
+            SystemdSystem,
+            "/etc/NetworkManager/dispatcher.d",
+            true,
+            Filter::Any,
+        ),
+        dir(
+            Browser,
+            "/etc/opt/chrome/policies/managed",
+            false,
+            Filter::Json,
+        ),
+        dir(
+            Browser,
+            "/etc/chromium/policies/managed",
+            false,
+            Filter::Json,
+        ),
+        dir(
+            Browser,
+            "/etc/opt/edge/policies/managed",
+            false,
+            Filter::Json,
+        ),
+        dir(Browser, "/etc/brave/policies/managed", false, Filter::Json),
+        dir(Browser, "/etc/firefox/policies", false, Filter::Json),
+        dir(
+            Browser,
+            "/opt/google/chrome/extensions",
+            false,
+            Filter::Json,
+        ),
+        dir(
+            Browser,
+            "/usr/share/google-chrome/extensions",
+            false,
+            Filter::Json,
+        ),
+        dir(
+            Browser,
+            "/usr/share/chromium/extensions",
+            false,
+            Filter::Json,
+        ),
+        file(DevTools, "/etc/gitconfig"),
+        dir(
+            Hooks,
+            "/etc/dnf/libdnf5-plugins/actions.d",
+            false,
+            Filter::Any,
+        ),
+        dir(
+            Hooks,
+            "/etc/dnf/plugins/post-transaction-actions.d",
+            false,
+            Filter::Any,
+        ),
+        dir(Hooks, "/etc/apt/apt.conf.d", false, Filter::Any),
+        dir(Hooks, "/etc/pacman.d/hooks", false, Filter::Any),
+        dir(
+            Applications,
+            "/usr/local/share/applications",
+            false,
+            Filter::Desktop,
+        ),
     ];
     for rc in [
         "/etc/profile",
@@ -215,6 +380,20 @@ pub fn system_targets() -> Vec<Target> {
         t.push(file(ShellRc, rc));
     }
     t
+}
+
+/// Directories directly in `dir` (none if it does not exist).
+fn child_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
 }
 
 fn is_editor_temp(name: &str) -> bool {
@@ -237,6 +416,8 @@ fn matches(filter: Filter, name: &str) -> bool {
         Filter::Conf => ext == Some("conf"),
         Filter::Fish => ext == Some("fish"),
         Filter::SystemdUnits => ext.is_some_and(|e| SYSTEMD_SUFFIXES.contains(&e)),
+        Filter::Pth => ext == Some("pth"),
+        Filter::Json => ext == Some("json"),
     }
 }
 

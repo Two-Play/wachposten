@@ -333,6 +333,11 @@ systemctl enable evil.service""")
         if ev:
             r = vm.as_user("fedora", f"wachposten --system show {ev['id']}")
             check("the event names the writing program", "changed by: python3" in r.stdout, r.stdout)
+        vm.sh("mkdir -p /etc/dnf/libdnf5-plugins/actions.d && printf 'post_transaction:::/bin/sh /tmp/.p/run\\n' > /etc/dnf/libdnf5-plugins/actions.d/x.actions")
+        ev = wait_for(lambda: find(events(vm, "fedora"), "/etc/dnf/libdnf5-plugins/actions.d/x.actions", "open"))
+        check("package manager hook running from /tmp raises a question", ev and ev["severity"] == "suspicious", ev)
+        if ev:
+            vm.as_user("fedora", f"wachposten --system remove {ev['id']}")
         vm.as_user("gast", """mkdir -p ~/.config/autostart && python3 -c "import os; open(os.path.expanduser('~/.config/autostart/x.desktop'),'w').write('[Desktop Entry]\\n')" """)
         time.sleep(2)
         who = """import json,socket,sys
