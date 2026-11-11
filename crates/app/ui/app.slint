@@ -17,7 +17,9 @@ export struct EventRow {
     level: string,
     kind: string,
     status: string,
+    // Short for lists, full for the detail view.
     when: string,
+    when-full: string,
     can-decide: bool,
     open: bool,
     // Accepted without a question, but it can still be undone.
@@ -176,6 +178,12 @@ component NavItem inherits Rectangle {
     callback clicked;
     height: 38px;
     border-radius: 8px;
+    accessible-role: tab;
+    accessible-label: badge > 0 ? label + " (" + badge + ")" : label;
+    accessible-item-selected: active;
+    accessible-action-default => {
+        root.clicked();
+    }
     background: active ? Palette.accent-background.transparentize(0.86) : ta.has-hover ? Theme.subtle : transparent;
     ta := TouchArea {
         clicked => {
@@ -255,6 +263,12 @@ component EventCard inherits Rectangle {
     callback clicked;
     height: 66px;
     border-radius: 8px;
+    accessible-role: list-item;
+    accessible-label: root.event.title + ", " + root.event.kind + ", " + root.event.status;
+    accessible-item-selected: root.selected;
+    accessible-action-default => {
+        root.clicked();
+    }
     background: selected ? Palette.accent-background.transparentize(0.88) : ta.has-hover ? Theme.subtle : Theme.card;
     border-width: 1px;
     border-color: selected ? Palette.accent-background.transparentize(0.5) : Theme.border;
@@ -420,7 +434,7 @@ component EventView inherits VerticalLayout {
                 }
             }
             Text {
-                text: detail.row.when + " · " + detail.row.status;
+                text: detail.row.when-full + " · " + detail.row.status;
                 font-size: 11px;
                 color: Theme.muted;
             }

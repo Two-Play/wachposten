@@ -65,6 +65,29 @@ fn when(ts: i64) -> String {
     )
 }
 
+/// Short time for lists: the time today, day and month this year, the date before.
+fn when_short(ts: i64) -> String {
+    let Some(t) = Local.timestamp_opt(ts, 0).single() else {
+        return ts.to_string();
+    };
+    let now = Local::now();
+    if t.date_naive() == now.date_naive() {
+        t.format("%H:%M").to_string()
+    } else if t.format("%Y").to_string() == now.format("%Y").to_string() {
+        t.format("%d.%m.").to_string()
+    } else {
+        t.format("%d.%m.%Y").to_string()
+    }
+}
+
+/// Labels are written for running text; at the start of a line they begin with a capital.
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
 fn status_label(status: Status) -> &'static str {
     match status {
         Status::Open => tr("offen", "open"),
@@ -104,10 +127,11 @@ fn row(state: &State, item: &Item) -> EventRow {
             "done"
         }
         .into(),
-        kind: i18n::kind_label(ev.kind).into(),
+        kind: capitalized(i18n::kind_label(ev.kind)).into(),
         ransomware: ev.kind == wachposten_core::Kind::Ransomware,
         status: status_label(ev.status).into(),
-        when: when(ev.updated_at).into(),
+        when: when_short(ev.updated_at).into(),
+        when_full: when(ev.updated_at).into(),
         can_decide: item.can_decide,
         open: ev.decidable(),
         noted: ev.status == Status::Noted,
@@ -151,7 +175,7 @@ fn detail(state: &State, item: Option<&Item>) -> EventDetail {
         valid: true,
         row: row(state, item),
         sentence: i18n::event_sentence(ev).into(),
-        kind: i18n::kind_label(ev.kind).into(),
+        kind: capitalized(i18n::kind_label(ev.kind)).into(),
         findings: strings(findings),
         lines: strings(lines),
         actor: ev
@@ -491,7 +515,16 @@ pub fn run(tab: Option<&str>, screenshot: Option<&Path>, dark: bool) -> Result<(
     let home = config.home.clone();
     let guard = Guard::open(config)?;
     let offscreen = screenshot
-        .map(|_| crate::shot::install(1000, 680))
+        .map(|_| {
+            let (w, h) = std::env::var("WACHPOSTEN_SHOT_SIZE")
+                .ok()
+                .and_then(|v| {
+                    let (w, h) = v.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                })
+                .unwrap_or((1000, 680));
+            crate::shot::install(w, h)
+        })
         .transpose()?;
     let ui = AppWindow::new()?;
     if offscreen.is_some() {
