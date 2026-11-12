@@ -35,6 +35,8 @@ jobs:
             git config --global --add safe.directory /src
             packaging/build-rpm.sh
             dnf -y -q install target/rpm/RPMS/*/wachposten-[0-9]*.rpm
+            mkdir -p target/rpm/out
+            cp target/rpm/RPMS/*/wachposten-[0-9]*.rpm target/rpm/out/
             wachposten --version
             test -f /usr/share/kio/servicemenus/wachposten-scan.desktop
             grep -q "ExecStart=/usr/bin/wachposten-daemon" /usr/lib/systemd/system/wachposten-daemon.service
@@ -42,8 +44,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rpm
-          # Without the debuginfo and debugsource packages.
-          path: target/rpm/RPMS/*/wachposten-[0-9]*.rpm
+          # Flat, and without the debuginfo and debugsource packages.
+          path: target/rpm/out/*.rpm
 
   deb:
     runs-on: ubuntu-24.04
@@ -90,7 +92,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: arch
-          path: packaging/arch/*.pkg.tar.zst
+          # Without the wachposten-debug package.
+          path: packaging/arch/wachposten-[0-9]*.pkg.tar.zst
 
   packages-ok:
     if: always()

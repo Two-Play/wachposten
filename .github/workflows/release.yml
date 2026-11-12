@@ -55,6 +55,8 @@ jobs:
         working-directory: dist
         run: |
           find . -type f -printf '%P\n' | sort
+          # Exactly one package of each kind, flat in dist/.
+          test "$(ls *.rpm | wc -l)" = 1 && test "$(ls *.deb | wc -l)" = 1 && test "$(ls *.pkg.tar.zst | wc -l)" = 1
           sha256sum -- *.rpm *.deb *.pkg.tar.zst > SHA256SUMS
           cat SHA256SUMS
       - name: Release notes from CHANGELOG.md
