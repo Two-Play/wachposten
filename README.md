@@ -9,6 +9,7 @@
 [![CI](https://github.com/Two-Play/wachposten/actions/workflows/ci.yml/badge.svg)](https://github.com/Two-Play/wachposten/actions/workflows/ci.yml)
 [![VM tests](https://github.com/Two-Play/wachposten/actions/workflows/vm.yml/badge.svg?branch=main)](https://github.com/Two-Play/wachposten/actions/workflows/vm.yml)
 [![Packages](https://github.com/Two-Play/wachposten/actions/workflows/packages.yml/badge.svg?branch=main)](https://github.com/Two-Play/wachposten/actions/workflows/packages.yml)
+[![Release](https://img.shields.io/github/v/release/Two-Play/wachposten?sort=semver)](https://github.com/Two-Play/wachposten/releases/latest)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 <br>
 [![Rust 2024](https://img.shields.io/badge/Rust-2024%20%C2%B7%201.89%2B-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -134,6 +135,27 @@ flowchart LR
 <a id="installation"></a>
 
 ## 📦 Installation
+
+### From a release
+
+Download the package for your system and `SHA256SUMS` from the
+[latest release](https://github.com/Two-Play/wachposten/releases/latest), then:
+
+| System | Install |
+|---|---|
+| Fedora 44 | `sudo dnf install ./wachposten-0.1.0-1.fc44.x86_64.rpm` |
+| Debian 13 | `sudo apt install ./wachposten_0.1.0-1_amd64.deb` |
+| Arch Linux | `sudo pacman -U wachposten-0.1.0-1-x86_64.pkg.tar.zst` |
+
+```bash
+sha256sum -c SHA256SUMS --ignore-missing     # check the download first
+sudo systemctl enable --now wachposten-daemon
+```
+
+The agent starts with the next login. The changes of each version are in
+[CHANGELOG.md](CHANGELOG.md).
+
+### From source
 
 | System | Build | Install |
 |---|---|---|
