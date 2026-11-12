@@ -1,0 +1,101 @@
+name: Release
+
+# A tag v<version> on main builds the packages and creates a draft release with them.
+# A maintainer reads the draft and publishes it by hand.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tag matches the version in Cargo.toml, the spec, the PKGBUILD and the changelog
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v=${TAG#v}
+          cargo=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          spec=$(sed -n 's/^Version: *//p' packaging/wachposten.spec)
+          arch=$(sed -n 's/^pkgver=//p' packaging/arch/PKGBUILD)
+          echo "tag $v, Cargo.toml $cargo, spec $spec, PKGBUILD $arch"
+          test "$v" = "$cargo" && test "$v" = "$spec" && test "$v" = "$arch"
+          grep -q "^## \[$v\]" CHANGELOG.md
+
+  packages:
+    needs: version
+    uses: ./.github/workflows/packages.yml
+
+  release:
+    needs: packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          find . -type f -printf '%P\n' | sort
+          # Exactly one package of each kind, flat in dist/.
+          test "$(ls *.rpm | wc -l)" = 1 && test "$(ls *.deb | wc -l)" = 1 && test "$(ls *.pkg.tar.zst | wc -l)" = 1
+          sha256sum -- *.rpm *.deb *.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          v=${TAG#v}
+          awk -v v="$v" '
+            $0 ~ "^## \\[" v "\\]" { on = 1; next }
+            on && /^## \[/ { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          rpm=$(cd dist && ls *.rpm)
+          deb=$(cd dist && ls *.deb)
+          pkg=$(cd dist && ls *.pkg.tar.zst)
+          cat >> notes.md <<EOF
+
+          ## Install
+
+          | System | Command |
+          |---|---|
+          | Fedora 44 | \`sudo dnf install ./$rpm\` |
+          | Debian 13 | \`sudo apt install ./$deb\` |
+          | Arch Linux | \`sudo pacman -U $pkg\` |
+
+          Then start the system daemon; the agent starts with the next login:
+
+          \`\`\`bash
+          sudo systemctl enable --now wachposten-daemon
+          \`\`\`
+
+          Check the download first with \`sha256sum -c SHA256SUMS --ignore-missing\`.
+          EOF
+          cat notes.md
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "Wachposten ${TAG#v}" --notes-file notes.md \
+            dist/*.rpm dist/*.deb dist/*.pkg.tar.zst dist/SHA256SUMS
