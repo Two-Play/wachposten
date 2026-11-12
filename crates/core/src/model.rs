@@ -33,10 +33,24 @@ pub enum Kind {
     Privileges,
     /// A program started from a temporary folder.
     TempExec,
+    /// A program that seems to encrypt the person's files; the daemon stopped it.
+    Ransomware,
+    /// Menu entries, file type handlers and file manager actions: they run a program when
+    /// the person opens a file or clicks an entry.
+    Applications,
+    /// Browser extensions and browser policies.
+    Browser,
+    /// Settings of developer tools that run commands (git, Python `.pth` files).
+    DevTools,
+    /// Hooks of package managers, run as root on every install.
+    Hooks,
+    /// A file the person had checked (file manager menu, `wachposten scan-file`) that matched
+    /// a malware signature or hash.
+    Checked,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 18] = [
         Kind::Autostart,
         Kind::SystemdUser,
         Kind::ShellRc,
@@ -49,6 +63,12 @@ impl Kind {
         Kind::Preload,
         Kind::Privileges,
         Kind::TempExec,
+        Kind::Ransomware,
+        Kind::Applications,
+        Kind::Browser,
+        Kind::DevTools,
+        Kind::Hooks,
+        Kind::Checked,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -65,12 +85,27 @@ impl Kind {
             Kind::Preload => "preload",
             Kind::Privileges => "privileges",
             Kind::TempExec => "temp-exec",
+            Kind::Ransomware => "ransomware",
+            Kind::Applications => "applications",
+            Kind::Browser => "browser",
+            Kind::DevTools => "dev-tools",
+            Kind::Hooks => "hooks",
+            Kind::Checked => "checked",
         }
     }
 
     /// Kinds that describe a single file decided on by its hash, not a baseline entry.
     pub fn is_file_report(self) -> bool {
-        matches!(self, Kind::Download | Kind::TempExec)
+        matches!(
+            self,
+            Kind::Download | Kind::Checked | Kind::TempExec | Kind::Ransomware
+        )
+    }
+
+    /// Kinds that describe a running program, which may have deleted its file or run from
+    /// memory (`/proc/<pid>/exe`).
+    pub fn is_program(self) -> bool {
+        matches!(self, Kind::TempExec | Kind::Ransomware)
     }
 }
 
@@ -219,6 +254,8 @@ pub enum Status {
     Reverted,
     /// Recorded without a question (deletions).
     Accepted,
+    /// Nothing looked dangerous: accepted with a short hint, but it can still be removed.
+    Noted,
 }
 
 impl Status {
@@ -229,6 +266,7 @@ impl Status {
             Status::Removed => "removed",
             Status::Reverted => "reverted",
             Status::Accepted => "accepted",
+            Status::Noted => "noted",
         }
     }
 }
@@ -242,6 +280,7 @@ impl FromStr for Status {
             "removed" => Ok(Status::Removed),
             "reverted" => Ok(Status::Reverted),
             "accepted" => Ok(Status::Accepted),
+            "noted" => Ok(Status::Noted),
             _ => Err(format!("unknown status {s:?}")),
         }
     }
@@ -286,6 +325,21 @@ pub struct Event {
 impl Event {
     pub fn new_hash(&self) -> &str {
         hash_of(self.new_entry.as_ref())
+    }
+
+    /// The event still waits for a decision, either an open question or a noted change that
+    /// can be undone.
+    pub fn decidable(&self) -> bool {
+        matches!(self.status, Status::Open | Status::Noted)
+    }
+
+    /// Open and dangerous enough to interrupt the person with a question. Other open events
+    /// only show a short warning and wait in the tray and the window.
+    pub fn wants_popup(&self) -> bool {
+        self.status == Status::Open
+            && (self.kind.is_file_report()
+                || self.severity == Severity::Malicious
+                || crate::analyze::alarming(self.kind, &self.findings))
     }
 }
 

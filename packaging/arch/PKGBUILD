@@ -1,0 +1,51 @@
+# Maintainer: Two-Play <https://github.com/Two-Play/wachposten>
+# Build from a checkout: cd packaging/arch && makepkg -si
+pkgname=wachposten
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Security guard for Linux desktops: persistence, program starts, ransomware, YARA-X"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Two-Play/wachposten"
+license=('GPL-3.0-or-later')
+depends=('glibc' 'fontconfig' 'libxkbcommon' 'cronie')
+makedepends=('cargo' 'clang' 'lld' 'pkgconf')
+optdepends=('clamav: scan Windows files, Office documents and archives'
+            'python-nautilus: "Check with Wachposten" in GNOME Files'
+            'snapper: snapshots of /home against ransomware')
+# ring's C parts would be built as GCC LTO bitcode, which the Rust link step cannot use.
+options=('!lto')
+backup=('etc/wachposten/daemon.toml' 'etc/xdg/autostart/wachposten-agent.desktop')
+
+_root() { cd "$startdir/../.."; }
+
+prepare() {
+    _root
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    _root
+    # Rust links with lld, which cannot read GCC LTO objects of the bundled C parts (ring,
+    # SQLite): make sure no -flto reaches the C compiler.
+    CFLAGS=$(printf '%s' "$CFLAGS" | sed 's/-flto[^ ]*//g; s/-ffat-lto-objects//g')
+    CXXFLAGS=$(printf '%s' "$CXXFLAGS" | sed 's/-flto[^ ]*//g; s/-ffat-lto-objects//g')
+    LDFLAGS=$(printf '%s' "$LDFLAGS" | sed 's/-flto[^ ]*//g')
+    export CFLAGS CXXFLAGS LDFLAGS
+    # Build the C parts with clang and link with it as well: lld then understands whatever
+    # objects the C compiler produced.
+    export CC=clang CXX=clang++
+    local triple
+    triple=$(rustc -vV | sed -n 's/host: //p' | tr 'a-z-' 'A-Z_')
+    export "CARGO_TARGET_${triple}_LINKER=clang"
+    cargo build --release --frozen -p wachposten -p wachposten-agent -p wachposten-daemon
+}
+
+check() {
+    _root
+    cargo test --frozen
+}
+
+package() {
+    _root
+    packaging/install-tree.sh "$pkgdir"
+}

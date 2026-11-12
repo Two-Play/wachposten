@@ -6574,8 +6574,10 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "notify-rust",
  "slint",
  "slint-build",
+ "tempfile",
  "toml",
  "wachposten-core",
  "wachposten-scan",
@@ -6590,9 +6592,11 @@ dependencies = [
  "ksni",
  "log",
  "notify-rust",
+ "tempfile",
  "wachposten-core",
  "wachposten-scan",
  "wachposten-watch",
+ "zip",
 ]
 
 [[package]]
@@ -6600,7 +6604,9 @@ name = "wachposten-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "hex",
+ "libc",
  "log",
  "regex",
  "rusqlite",
@@ -6621,6 +6627,7 @@ dependencies = [
  "aya",
  "clap",
  "env_logger",
+ "libc",
  "log",
  "nix",
  "tempfile",

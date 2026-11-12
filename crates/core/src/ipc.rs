@@ -61,6 +61,8 @@ pub enum Request {
     WhoWrote {
         paths: Vec<String>,
     },
+    /// Look for clamd again now (after the person installed or started it).
+    RecheckClamav,
 }
 
 // Replies only live while they cross the socket; boxing the large variant would only add noise.
@@ -90,8 +92,20 @@ pub enum Reply {
         known_hashes: i64,
         #[serde(default)]
         clamav: bool,
+        /// `off`, `not-installed`, `not-running` or `running`.
+        #[serde(default)]
+        clamav_state: String,
         #[serde(default)]
         ebpf: bool,
+        /// The ransomware check runs.
+        #[serde(default)]
+        ransomware: bool,
+        /// `/home` lies on btrfs.
+        #[serde(default)]
+        home_btrfs: bool,
+        /// The tool that takes snapshots of `/home`, if any.
+        #[serde(default)]
+        snapshots: Option<String>,
     },
     Quarantine {
         items: Vec<QuarantineItem>,

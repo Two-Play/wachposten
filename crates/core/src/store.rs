@@ -49,6 +49,13 @@ CREATE TABLE IF NOT EXISTS events (
     quarantine_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS events_open ON events (status, path);
+CREATE TABLE IF NOT EXISTS allowlist_user (
+    hash TEXT NOT NULL,
+    uid INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (hash, uid)
+);
 CREATE TABLE IF NOT EXISTS allowlist (
     hash TEXT PRIMARY KEY,
     path TEXT NOT NULL,
@@ -74,6 +81,9 @@ pub struct AllowedFile {
     pub hash: String,
     pub path: String,
     pub added_at: i64,
+    /// Allowed for this user only (the daemon); `None` for everybody.
+    #[serde(default)]
+    pub uid: Option<u32>,
 }
 
 pub struct Store {
@@ -240,6 +250,12 @@ impl Store {
         add_column(&conn, "events", "actor", "TEXT")?;
         add_column(&conn, "quarantine", "uid", "INTEGER")?;
         add_column(&conn, "quarantine", "gid", "INTEGER")?;
+        // The state before a noted change, so it can still be undone (hash in `old_hash`).
+        add_column(&conn, "events", "old_type", "TEXT")?;
+        add_column(&conn, "events", "old_mode", "INTEGER")?;
+        add_column(&conn, "events", "old_size", "INTEGER")?;
+        add_column(&conn, "events", "old_content", "BLOB")?;
+        add_column(&conn, "events", "old_link_target", "TEXT")?;
         Ok(Store { conn })
     }
 
@@ -399,6 +415,58 @@ impl Store {
         Ok(())
     }
 
+    /// A newer change of `path` replaces noted ones: they can no longer be undone on their own.
+    pub fn close_noted(&self, path: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE events SET status = 'accepted' WHERE path = ?1 AND status = 'noted'",
+            [path],
+        )?;
+        Ok(())
+    }
+
+    /// Keep the state an event replaced, so a change accepted without a question can still be
+    /// undone.
+    pub fn set_old_entry(&self, id: i64, entry: Option<&Entry>) -> rusqlite::Result<()> {
+        let (ty, _, mode, size, content, link) = entry_cols(entry);
+        self.conn.execute(
+            "UPDATE events SET old_type = ?2, old_mode = ?3, old_size = ?4, old_content = ?5,
+               old_link_target = ?6 WHERE id = ?1",
+            params![id, ty, mode, size, content, link],
+        )?;
+        Ok(())
+    }
+
+    /// The state an event replaced, as kept by [`Store::set_old_entry`]: `Ok(None)` if it was not
+    /// kept, `Ok(Some(None))` if the entry did not exist before.
+    pub fn old_entry(&self, id: i64) -> rusqlite::Result<Option<Option<Entry>>> {
+        self.conn
+            .query_row(
+                "SELECT old_hash, old_type, old_mode, old_size, old_content, old_link_target
+                 FROM events WHERE id = ?1",
+                [id],
+                |r| {
+                    let hash: String = r.get(0)?;
+                    if hash == crate::model::ABSENT {
+                        return Ok(Some(None));
+                    }
+                    let ty: Option<String> = r.get(1)?;
+                    if ty.is_none() {
+                        return Ok(None);
+                    }
+                    Ok(Some(entry_from_cols((
+                        ty,
+                        Some(hash),
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))))
+                },
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
     /// Note which program made the change an event describes.
     pub fn set_actor(&self, id: i64, actor: &str) -> rusqlite::Result<()> {
         self.conn.execute(
@@ -448,6 +516,11 @@ impl Store {
         self.query_events("WHERE status = 'open' ORDER BY id", [])
     }
 
+    /// Events created at or after `since` (Unix time), oldest first.
+    pub fn events_since(&self, since: i64) -> rusqlite::Result<Vec<Event>> {
+        self.query_events("WHERE created_at >= ?1 ORDER BY id", [since])
+    }
+
     pub fn recent_events(&self, limit: i64) -> rusqlite::Result<Vec<Event>> {
         self.query_events("ORDER BY id DESC LIMIT ?1", [limit])
     }
@@ -476,19 +549,49 @@ impl Store {
         Ok(())
     }
 
+    /// Allow a file hash for one user only, so one person's decision does not hide the file
+    /// from everybody else.
+    pub fn allow_hash_for(&self, hash: &str, path: &str, uid: u32) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO allowlist_user (hash, uid, path, added_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![hash, uid, path, now()],
+        )?;
+        Ok(())
+    }
+
     /// Allowed file hashes with the path they were allowed for, newest first.
     pub fn allowlist(&self) -> rusqlite::Result<Vec<AllowedFile>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT hash, path, added_at FROM allowlist ORDER BY added_at DESC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT hash, path, added_at, NULL FROM allowlist
+             UNION ALL SELECT hash, path, added_at, uid FROM allowlist_user
+             ORDER BY added_at DESC",
+        )?;
         stmt.query_map([], |r| {
             Ok(AllowedFile {
                 hash: r.get(0)?,
                 path: r.get(1)?,
                 added_at: r.get(2)?,
+                uid: r.get(3)?,
             })
         })?
         .collect()
+    }
+
+    /// Whether `hash` is allowed for everybody or for `uid`.
+    pub fn is_allowed_for(&self, hash: &str, uid: Option<u32>) -> rusqlite::Result<bool> {
+        if self.is_allowed_hash(hash)? {
+            return Ok(true);
+        }
+        let Some(uid) = uid else { return Ok(false) };
+        self.conn
+            .query_row(
+                "SELECT 1 FROM allowlist_user WHERE hash = ?1 AND uid = ?2",
+                params![hash, uid],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
     }
 
     /// Forget an allowed hash; the file is reported again next time.
@@ -496,6 +599,9 @@ impl Store {
         Ok(self
             .conn
             .execute("DELETE FROM allowlist WHERE hash = ?1", [hash])?
+            + self
+                .conn
+                .execute("DELETE FROM allowlist_user WHERE hash = ?1", [hash])?
             > 0)
     }
 

@@ -48,6 +48,7 @@ pub fn kind_label(kind: Kind) -> &'static str {
         Kind::Ssh => tr("SSH-Zugang", "SSH access"),
         Kind::Crontab => tr("Zeitgesteuerte Aufgabe (cron)", "scheduled task (cron)"),
         Kind::Download => tr("Download", "download"),
+        Kind::Checked => tr("Geprüfte Datei", "checked file"),
         Kind::SystemdSystem => tr("Systemdienst / Systemstart", "system service / boot"),
         Kind::Preload => tr("Bibliotheken laden", "library loading"),
         Kind::Privileges => tr(
@@ -58,6 +59,14 @@ pub fn kind_label(kind: Kind) -> &'static str {
             "Programmstart aus temporärem Ordner",
             "program start from a temporary folder",
         ),
+        Kind::Ransomware => tr("Erpressungs-Software", "ransomware"),
+        Kind::Applications => tr(
+            "Programmstarter und Dateizuordnungen",
+            "launchers and file handlers",
+        ),
+        Kind::Browser => tr("Browser-Erweiterung", "browser extension"),
+        Kind::DevTools => tr("Entwickler-Werkzeuge", "developer tools"),
+        Kind::Hooks => tr("Paketmanager-Hook", "package manager hook"),
     }
 }
 
@@ -114,6 +123,19 @@ pub fn rule_label(rule: &str) -> &'static str {
             "tarnt sich mit dem Namen eines Systemprozesses",
             "poses as a system process by name",
         ),
+        "pth-code" => tr(
+            "führt bei jedem Python-Start Code aus",
+            "runs code at every Python start",
+        ),
+        "git-command" => tr(
+            "lässt git einen Befehl oder Hook ausführen",
+            "makes git run a command or hook",
+        ),
+        "ransomware" => tr(
+            "verschlüsselt anscheinend deine Dateien",
+            "seems to encrypt your files",
+        ),
+        "decoy" => tr("hat eine Köderdatei verändert", "changed a decoy file"),
         _ => tr("auffälliger Inhalt", "suspicious content"),
     }
 }
@@ -122,6 +144,10 @@ pub fn rule_label(rule: &str) -> &'static str {
 pub fn event_title(ev: &Event) -> String {
     let name = display_name(&ev.path);
     match (ev.kind, ev.change) {
+        (Kind::Ransomware, _) => format!(
+            "{}: {name}",
+            tr("Verschlüsselt deine Dateien", "Encrypting your files")
+        ),
         (Kind::TempExec, _) if ev.severity == crate::model::Severity::Malicious => {
             format!(
                 "{}: {name}",
@@ -147,6 +173,7 @@ pub fn event_title(ev: &Event) -> String {
             "{}: {name}",
             tr("Schadsoftware erkannt", "Malware detected")
         ),
+        (Kind::Checked, _) => format!("{}: {name}", tr("Schadsoftware gefunden", "Malware found")),
         (Kind::Autostart, Change::Created) => {
             tr("Neuer Autostart-Eintrag", "New autostart entry").into()
         }
@@ -156,6 +183,18 @@ pub fn event_title(ev: &Event) -> String {
         (Kind::Ssh, _) => format!(
             "{}: {name}",
             tr("SSH-Zugang geändert", "SSH access changed")
+        ),
+        (Kind::Browser, Change::Created) => format!(
+            "{}: {name}",
+            tr("Neue Browser-Erweiterung", "New browser extension")
+        ),
+        (Kind::Browser, _) => format!(
+            "{}: {name}",
+            tr("Browser-Einstellung geändert", "Browser setting changed")
+        ),
+        (Kind::Hooks, _) => format!(
+            "{}: {name}",
+            tr("Paketmanager-Hook", "Package manager hook")
         ),
         (Kind::Crontab, _) => {
             tr("Zeitgesteuerte Aufgabe geändert", "Scheduled task changed").into()
@@ -168,6 +207,22 @@ pub fn event_title(ev: &Event) -> String {
 /// One-sentence explanation of what happened.
 pub fn event_sentence(ev: &Event) -> &'static str {
     match (ev.kind, ev.change) {
+        (Kind::Applications, _) => tr(
+            "Ein Programmstarter, eine Dateizuordnung oder ein Rechtsklick-Eintrag wurde angelegt oder geändert. Er startet ein Programm, sobald du eine Datei öffnest oder den Eintrag wählst.",
+            "A launcher, file handler or right-click action was added or changed. It starts a program when you open a file or pick the entry.",
+        ),
+        (Kind::Browser, _) => tr(
+            "Eine Browser-Erweiterung oder eine Browser-Richtlinie wurde hinzugefügt oder geändert. Erweiterungen können alles mitlesen, was du im Browser tust.",
+            "A browser extension or browser policy was added or changed. Extensions can read everything you do in the browser.",
+        ),
+        (Kind::DevTools, _) => tr(
+            "Eine Einstellung von git oder Python wurde geändert, die Befehle ausführen kann (Hooks, Aliase, .pth-Dateien).",
+            "A git or Python setting that can run commands was changed (hooks, aliases, .pth files).",
+        ),
+        (Kind::Hooks, _) => tr(
+            "Ein Hook des Paketmanagers wurde angelegt oder geändert. Er läuft bei jeder Installation mit Root-Rechten.",
+            "A package manager hook was added or changed. It runs with root rights on every install.",
+        ),
         (Kind::Autostart, _) => tr(
             "Ein Programm hat sich in deinen Autostart eingetragen.",
             "A program added itself to your autostart.",
@@ -200,6 +255,10 @@ pub fn event_sentence(ev: &Event) -> &'static str {
             "Eine heruntergeladene Datei ist als Schadsoftware bekannt. Öffne sie nicht.",
             "A downloaded file is known malware. Do not open it.",
         ),
+        (Kind::Checked, _) => tr(
+            "Beim Prüfen wurde diese Datei als Schadsoftware erkannt. Öffne sie nicht. Entfernen verschiebt sie in die Quarantäne.",
+            "The check found this file to be malware. Do not open it. Remove moves it to quarantine.",
+        ),
         (Kind::SystemdSystem, _) => tr(
             "Etwas soll beim Systemstart oder als Systemdienst mit Root-Rechten laufen.",
             "Something is set to run at boot or as a system service with root rights.",
@@ -211,6 +270,10 @@ pub fn event_sentence(ev: &Event) -> &'static str {
         (Kind::Privileges, _) => tr(
             "Rechte für sudo, polkit oder die Anmeldung (PAM) wurden geändert.",
             "Rights for sudo, polkit or login (PAM) were changed.",
+        ),
+        (Kind::Ransomware, _) => tr(
+            "Ein Programm verschlüsselt anscheinend deine Dateien. Es wurde angehalten und wartet auf deine Entscheidung. „Entfernen“ beendet es.",
+            "A program seems to be encrypting your files. It was stopped and waits for your decision. \"Remove\" ends it.",
         ),
         (Kind::TempExec, _) => tr(
             "Ein Programm wurde aus einem temporären Ordner gestartet. Schadsoftware nutzt solche Orte gern.",

@@ -3,7 +3,9 @@
 //! It reports two things fanotify cannot:
 //! - scripts run through an interpreter (`sh /tmp/x.sh`, `python3 /tmp/x.py`) and programs
 //!   started from memory (memfd), which become program start reports;
-//! - which process wrote a path, so events can name the program behind a change.
+//! - which process wrote a path, so events can name the program behind a change;
+//! - every write, rename and deletion in home folders, for the ransomware check in
+//!   [`crate::ransom`].
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -23,9 +25,13 @@ use wachposten_scan::MalwareScanner;
 use crate::Msg;
 use crate::exec::{ExecReport, temp_root};
 use crate::proc::{self, ProcInfo};
+use crate::ransom::{self, Alarm, Detector, Limits, Op};
 
 const KIND_EXEC: u32 = 1;
 const KIND_WRITE: u32 = 2;
+const OP_OPEN: u32 = 0;
+const OP_RENAME: u32 = 1;
+const OP_UNLINK: u32 = 4;
 const AT_FDCWD: i32 = -100;
 const AT_EMPTY_PATH: u32 = 0x1000;
 const PATH_LEN: usize = 256;
@@ -42,7 +48,7 @@ static OBJECT: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/wa
 
 /// Programs and the tracepoints they attach to. Missing tracepoints (`open`, `rename` and
 /// `symlink` do not exist on every architecture) are skipped.
-const PROGRAMS: [(&str, &str); 12] = [
+const PROGRAMS: [(&str, &str); 14] = [
     ("execve_enter", "sys_enter_execve"),
     ("execveat_enter", "sys_enter_execveat"),
     ("execve_exit", "sys_exit_execve"),
@@ -55,6 +61,8 @@ const PROGRAMS: [(&str, &str); 12] = [
     ("symlinkat_enter", "sys_enter_symlinkat"),
     ("symlink_enter", "sys_enter_symlink"),
     ("linkat_enter", "sys_enter_linkat"),
+    ("unlinkat_enter", "sys_enter_unlinkat"),
+    ("unlink_enter", "sys_enter_unlink"),
 ];
 
 /// One event from the ring buffer, see `struct event` in the C source.
@@ -65,6 +73,7 @@ pub struct RawEvent {
     pub uid: u32,
     pub dirfd: i32,
     pub flags: u32,
+    pub op: u32,
     pub comm: String,
     pub path: String,
     pub args: Vec<String>,
@@ -96,6 +105,7 @@ pub fn parse(b: &[u8]) -> Option<RawEvent> {
         uid: u32_at(b, 8),
         dirfd: u32_at(b, 12) as i32,
         flags: u32_at(b, 16),
+        op: u32_at(b, 20),
         comm: c_string(&b[24..40]),
         path: c_string(&b[40..40 + PATH_LEN]),
         args,
@@ -226,7 +236,7 @@ const INTERPRETERS: [&str; 14] = [
     "tclsh", "pwsh",
 ];
 
-fn is_interpreter(name: &str) -> bool {
+pub fn is_interpreter(name: &str) -> bool {
     INTERPRETERS.contains(&name) || name.starts_with("python") || name.starts_with("perl5")
 }
 
@@ -249,7 +259,10 @@ pub fn script_in_temp(ev: &RawEvent, program: &Path) -> Option<PathBuf> {
             continue;
         }
         let path = resolve(arg, ev.pid, AT_FDCWD)?;
-        return (temp_root(&path).is_some() && path.is_file()).then_some(path);
+        // Judge the real file: a folder in /tmp may be a link to /etc, and root must never
+        // take /etc/passwd for a script in /tmp.
+        let real = fs::canonicalize(&path).ok()?;
+        return (temp_root(&real).is_some() && real.is_file()).then_some(real);
     }
     None
 }
@@ -268,10 +281,74 @@ pub fn memfd_exe(ev: &RawEvent) -> Option<String> {
 }
 
 /// Load and attach the eBPF programs and handle their events in background threads.
-pub fn start(tx: Sender<Msg>, scanner: Arc<MalwareScanner>, writers: SharedWriters) -> Result<()> {
+/// A process's parent, read once per process.
+#[derive(Default)]
+struct Parents(HashMap<u32, (Option<u32>, Instant)>);
+
+impl Parents {
+    fn get(&mut self, pid: u32, now: Instant) -> Option<u32> {
+        if self.0.len() > 50_000 {
+            self.0
+                .retain(|_, (_, t)| now.duration_since(*t) < Duration::from_secs(60));
+        }
+        self.0
+            .entry(pid)
+            .or_insert_with(|| (proc::info(pid as i32).ppid.map(|p| p as u32), now))
+            .0
+    }
+}
+
+/// The decoy files belong to the agent, which may remove them. Only an installed agent (a
+/// program owned by root) counts: malware could simply call itself wachposten-agent.
+fn is_agent(pid: u32) -> bool {
+    proc::root_owned_exe(pid as i32)
+        .is_some_and(|e| e.file_name().is_some_and(|n| n == "wachposten-agent"))
+}
+
+/// Hand one write event to the ransomware check.
+fn check_ransom(
+    ev: &RawEvent,
+    path: &Path,
+    detector: &mut Detector,
+    parents: &mut Parents,
+    now: Instant,
+) -> Option<Alarm> {
+    let op = match ev.op {
+        OP_OPEN => Op::Write { flags: ev.flags },
+        OP_RENAME => Op::Rename {
+            from: ev
+                .args
+                .first()
+                .and_then(|old| resolve(old, ev.pid, ev.flags as i32)),
+        },
+        OP_UNLINK => Op::Unlink,
+        _ => return None,
+    };
+    let interesting = ransom::user_data(path)
+        || ransom::is_decoy(path)
+        || matches!(&op, Op::Rename { from: Some(f) } if ransom::user_data(f) || ransom::is_decoy(f));
+    if !interesting || detector.is_silenced(ev.pid) {
+        return None;
+    }
+    let ppid = parents.get(ev.pid, now);
+    let alarm = detector.observe(ev.pid, ppid, path, &op, now)?;
+    if matches!(alarm.reason, ransom::Reason::Decoy(_)) && is_agent(alarm.pid) {
+        return None;
+    }
+    Some(alarm)
+}
+
+/// Load and attach the eBPF programs and handle their events in background threads.
+/// `ransom` enables the ransomware check with these limits.
+pub fn start(
+    tx: Sender<Msg>,
+    scanner: Arc<MalwareScanner>,
+    writers: SharedWriters,
+    ransom: Option<Limits>,
+) -> Result<()> {
     #[cfg(not(wachposten_bpf))]
     {
-        let _ = (tx, scanner, writers);
+        let _ = (tx, scanner, writers, ransom);
         anyhow::bail!("this build has no eBPF part (clang was missing)");
     }
     #[cfg(wachposten_bpf)]
@@ -302,6 +379,7 @@ pub fn start(tx: Sender<Msg>, scanner: Arc<MalwareScanner>, writers: SharedWrite
         let ring = RingBuf::try_from(bpf.take_map("EVENTS").context("ring buffer missing")?)?;
         log::info!("eBPF: {attached} tracepoints attached");
 
+        let exec_tx = tx.clone();
         let (scan_tx, scan_rx) = mpsc::channel::<(PathBuf, ProcInfo, String, Vec<Finding>)>();
         thread::Builder::new()
             .name("ebpf-scan".into())
@@ -315,7 +393,7 @@ pub fn start(tx: Sender<Msg>, scanner: Arc<MalwareScanner>, writers: SharedWrite
                         blocked: false,
                         via: Some(via),
                     };
-                    if tx.send(Msg::Exec(report)).is_err() {
+                    if exec_tx.send(Msg::Exec(report)).is_err() {
                         break;
                     }
                 }
@@ -328,6 +406,8 @@ pub fn start(tx: Sender<Msg>, scanner: Arc<MalwareScanner>, writers: SharedWrite
             let me = std::process::id();
             let mut watched = Watched::build();
             let mut built = Instant::now();
+            let mut detector = ransom.map(Detector::new);
+            let mut parents = Parents::default();
             let mut seen: HashMap<(PathBuf, u32), Instant> = HashMap::new();
             loop {
                 {
@@ -338,6 +418,9 @@ pub fn start(tx: Sender<Msg>, scanner: Arc<MalwareScanner>, writers: SharedWrite
                     watched = Watched::build();
                     built = Instant::now();
                     seen.retain(|_, t| t.elapsed() < Duration::from_secs(600));
+                    if let Some(d) = &mut detector {
+                        d.prune(Instant::now());
+                    }
                 }
                 while let Some(item) = ring.next() {
                     let Some(ev) = parse(&item) else { continue };
@@ -350,7 +433,20 @@ pub fn start(tx: Sender<Msg>, scanner: Arc<MalwareScanner>, writers: SharedWrite
                             let Some(path) = resolve(&ev.path, ev.pid, ev.dirfd) else {
                                 continue;
                             };
-                            if !watched.matches(&path) {
+                            if let Some(d) = &mut detector
+                                && let Some(alarm) =
+                                    check_ransom(&ev, &path, d, &mut parents, Instant::now())
+                            {
+                                log::warn!(
+                                    "ransomware check: process {} – {}",
+                                    alarm.pid,
+                                    alarm.reason.describe()
+                                );
+                                if tx.send(Msg::Ransom(alarm)).is_err() {
+                                    break;
+                                }
+                            }
+                            if ev.op == OP_UNLINK || !watched.matches(&path) {
                                 continue;
                             }
                             let info = proc::info(ev.pid as i32);
@@ -436,6 +532,7 @@ mod tests {
             uid: 1000,
             dirfd: AT_FDCWD,
             flags: 0,
+            op: 0,
             comm: "x".into(),
             path: path.into(),
             args: args.iter().map(|a| a.to_string()).collect(),

@@ -1,26 +1,192 @@
+<div align="center">
+
+<img src="docs/logo.svg" alt="Wachposten logo" width="112">
+
 # Wachposten
 
-[![CI](https://github.com/Two-Play/wachposten/actions/workflows/ci.yml/badge.svg)](https://github.com/Two-Play/wachposten/actions/workflows/ci.yml)
+**A guard for the Linux desktop that notices when malware tries to settle in – and asks you.**
 
-Wachposten guards a Linux desktop against malware that tries to settle in. Malware on
-Linux has to start again after a reboot or login, and the places it can use for that are few:
-autostart entries, systemd user units, shell startup files, cron, `LD_PRELOAD`, SSH keys.
-Wachposten watches these places and asks the person at the computer about every new or
-changed entry:
+[![CI](https://github.com/Two-Play/wachposten/actions/workflows/ci.yml/badge.svg)](https://github.com/Two-Play/wachposten/actions/workflows/ci.yml)
+[![VM tests](https://github.com/Two-Play/wachposten/actions/workflows/vm.yml/badge.svg?branch=main)](https://github.com/Two-Play/wachposten/actions/workflows/vm.yml)
+[![Packages](https://github.com/Two-Play/wachposten/actions/workflows/packages.yml/badge.svg?branch=main)](https://github.com/Two-Play/wachposten/actions/workflows/packages.yml)
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
+<br>
+[![Rust 2024](https://img.shields.io/badge/Rust-2024%20%C2%B7%201.89%2B-dea584?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Slint](https://img.shields.io/badge/UI-Slint-2379f4)](https://slint.dev/)
+[![eBPF](https://img.shields.io/badge/kernel-eBPF%20%C2%B7%20fanotify-ff6f00)](https://ebpf.io/)
+[![Linux](https://img.shields.io/badge/platform-Linux-fcc624?logo=linux&logoColor=black)](#installation)
+[![Fedora · Debian · Arch](https://img.shields.io/badge/packages-RPM%20%C2%B7%20DEB%20%C2%B7%20Arch-51a2da)](#installation)
+[![Languages](https://img.shields.io/badge/i18n-Deutsch%20%C2%B7%20English-555)](crates/app/translations)
+
+[Features](#features) · [Screenshots](#screenshots) · [Installation](#installation) · [How it works](#how-it-works) · [Command line](#command-line) · [Roadmap](#roadmap)
+
+</div>
+
+---
+
+Malware on Linux has to start again after a reboot or login, and the places it can use for that
+are few: autostart entries, systemd user units, shell startup files, cron, `LD_PRELOAD`, SSH
+keys. Wachposten watches these places and asks the person at the computer when a new or changed
+entry looks dangerous:
 
 > **New autostart entry** — A program added itself to your autostart.
 > `~/.config/autostart/update.desktop` · ⚠ starts something from a temporary folder
 > **[Remove] [Allow] [Later]**
 
-Known malware is recognised in later stages with YARA-X rules and hash lists, and ClamAV can
-be added for Windows files and mail attachments. The core is the persistence and behaviour
-watch, because no maintained open signature database for Linux desktop malware exists.
+Known malware is recognised with YARA-X rules and hash lists, and ClamAV can be added for
+Windows files and mail attachments. The core is the persistence and behaviour watch, because no
+maintained open signature database for Linux desktop malware exists.
 
-**Status: all 5 stages built.** The agent watches the home directory and scans downloads; the root
-daemon watches system-wide locations and program starts from temporary folders; a window shows
-it all. See [Roadmap](#roadmap).
+> [!NOTE]
+> **Status: all 6 stages are built.** The agent watches the home directory and scans downloads;
+> the root daemon watches system-wide locations, program starts from temporary folders and
+> ransomware; a window shows it all. See the [Roadmap](#roadmap).
 
-## What is watched (stage 1)
+<a id="features"></a>
+
+## ✨ Features
+
+| | Feature | What it does |
+|:-:|---|---|
+| 🏠 | [**Persistence watch**](#what-is-watched) | autostart, systemd, shell files, cron, SSH keys, browser extensions, git hooks – a baseline and a question for every dangerous change |
+| 🧬 | [**Known malware**](#known-malware) | YARA-X rules for Linux, MalwareBazaar hash list, optional ClamAV; new downloads are scanned |
+| 🛡️ | [**System daemon**](#system-daemon) | root service with fanotify: refuses known malware started from `/tmp` and `/dev/shm`, watches `/etc` |
+| 🔬 | [**eBPF**](#ebpf) | scripts through interpreters, programs started from memory, and *who* changed a file |
+| 🔒 | [**Ransomware**](#ransomware) | mass encryption by rate and content, optional decoy files – the process is stopped and you decide |
+| 🪟 | [**Window and tray**](#window-and-clamav) | Slint window in light and dark, tray icon, notifications with Remove / Allow |
+| ♻️ | **Undo** | Remove puts the old version back; quarantine and history let you take every step back |
+| 📂 | [**File managers**](#check-with-wachposten) | “Check with Wachposten” in Dolphin and GNOME Files |
+
+<a id="screenshots"></a>
+
+## 📸 Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/overview.png" alt="Overview with one dangerous alert"></td>
+    <td width="50%"><img src="docs/alerts-dark.png" alt="Alerts in the dark scheme"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Overview</b> – one state at a glance</sub></td>
+    <td align="center"><sub><b>Alerts</b> – dark scheme</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/history.png" alt="History with an SSH key change"></td>
+    <td width="50%"><img src="docs/settings.png" alt="Settings"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>History</b> – every change, with undo</sub></td>
+    <td align="center"><sub><b>Settings</b></sub></td>
+  </tr>
+</table>
+
+<sub>Rendered with demo data by <code>test/screenshots.sh</code>.</sub>
+
+<a id="how-it-works"></a>
+
+## ⚙️ How it works
+
+```mermaid
+flowchart LR
+    subgraph user["👤 Your session"]
+        A["wachposten-agent<br/><sub>inotify · tray · notifications</sub>"]
+        W["wachposten<br/><sub>window · CLI</sub>"]
+        F["Dolphin / GNOME Files<br/><sub>Check with Wachposten</sub>"]
+    end
+    subgraph root["🛡️ root"]
+        D["wachposten-daemon<br/><sub>fanotify · eBPF · /etc baseline</sub>"]
+    end
+    S[("YARA-X · hash list<br/>ClamAV (clamd)")]
+    K(["Linux kernel"])
+    K -- "program starts,<br/>writes, renames" --> D
+    A <-- "daemon.sock<br/>(JSON lines)" --> D
+    W <-- "daemon.sock" --> D
+    F --> W
+    A --> S
+    D --> S
+```
+
+| Crate | Role |
+|---|---|
+| `crates/core` | baseline, analysis rules, decisions, settings, IPC, SQLite |
+| `crates/watch` | inotify watches |
+| `crates/scan` | YARA-X, hash list, MalwareBazaar, ClamAV |
+| `crates/daemon` | root daemon: fanotify, eBPF, system locations, socket |
+| `crates/agent` | per-user agent: tray, notifications, decoy files |
+| `crates/app` | `wachposten` CLI and the Slint window |
+
+## 📑 Contents
+
+- [📦 Installation](#installation)
+- [🏠 What is watched](#what-is-watched)
+- [🧬 Known malware](#known-malware)
+- [🛡️ System daemon](#system-daemon)
+- [🪟 Window and ClamAV](#window-and-clamav)
+- [🔬 eBPF](#ebpf)
+- [🔒 Ransomware](#ransomware)
+- [⌨️ Command line](#command-line)
+- [🔐 Security of the daemon itself](#security)
+- [⚠️ Limits](#limits)
+- [🗺️ Roadmap](#roadmap)
+- [🛠️ Development](#development)
+- [📄 License](#license)
+
+<a id="installation"></a>
+
+## 📦 Installation
+
+| System | Build | Install |
+|---|---|---|
+| Fedora, RHEL | `packaging/build-rpm.sh` | `sudo dnf install target/rpm/RPMS/x86_64/wachposten-*.rpm` |
+| Debian, Ubuntu | `packaging/build-deb.sh` (needs `clang pkg-config libfontconfig-dev libxkbcommon-dev dpkg-dev`) | `sudo apt install ./target/deb/wachposten_*.deb` |
+| Arch | `cd packaging/arch && makepkg -si` | (done by makepkg) |
+
+Then `sudo systemctl enable --now wachposten-daemon`; the agent starts with the next login.
+
+<details>
+<summary><b>RPM details</b></summary>
+
+`packaging/build-rpm.sh` builds an RPM from the working tree with all crates vendored (offline
+build). It installs the three programs to `/usr/bin`, the daemon unit, a user unit,
+`/etc/wachposten/daemon.toml`, a menu entry and an XDG autostart entry for the agent.
+
+```bash
+packaging/build-rpm.sh
+sudo dnf install target/rpm/RPMS/x86_64/wachposten-0.1.0-1.*.x86_64.rpm
+sudo systemctl enable --now wachposten-daemon
+```
+
+</details>
+
+<details>
+<summary><b>Without a package (cargo)</b></summary>
+
+```bash
+cargo install --path crates/agent
+cargo install --path crates/app
+install -Dm644 packaging/systemd/wachposten-agent.service ~/.config/systemd/user/wachposten-agent.service
+systemctl --user enable --now wachposten-agent
+```
+
+The system daemon is installed by hand as shown under [System daemon](#system-daemon).
+
+</details>
+
+<a id="check-with-wachposten"></a>
+
+### 📂 Check with Wachposten
+
+**Check with Wachposten** in the context menu of Dolphin and GNOME Files (with
+`nautilus-python`) comes with the packages. It runs `wachposten scan-file --notify` on the
+chosen files and folders and shows the result as a notification. Each file found becomes an
+alert in the window (Remove puts it into quarantine, Allow keeps it), and the notification
+names the full path and offers **Quarantine** and **Show**. Without a package,
+`wachposten integrate` adds it for the current user (Dolphin service menu, Nautilus script);
+`wachposten integrate --remove` takes it away.
+
+<a id="what-is-watched"></a>
+
+## 🏠 What is watched
 
 | Kind | Locations |
 |---|---|
@@ -31,9 +197,20 @@ it all. See [Roadmap](#roadmap).
 | Environment | `~/.config/environment.d/*.conf`, `.pam_environment` |
 | SSH | `authorized_keys`, `authorized_keys2`, `~/.ssh/rc` |
 | cron | the user's crontab (`crontab -l`, checked every minute) |
+| Launchers | `~/.local/share/applications/*.desktop`, `~/.config/mimeapps.list`, Dolphin service menus, Nautilus scripts |
+| Browser | Firefox extensions and `user.js` of every profile (also Flatpak); a new extension always waits for a decision, updates only give a hint |
+| Developer tools | `~/.gitconfig`, `~/.config/git/` (hooks, aliases with `!`, `core.pager` …), `*.pth` in the user's Python `site-packages` (run at every Python start) |
+| systemd extras | user generators, environment generators, `~/.config/systemd/user.conf` |
 
 On the first start the current state is recorded as the baseline without asking. After that
-every change becomes an event:
+every change becomes an event, checked against rules for typical persistence tricks. How loud
+Wachposten gets depends on what it finds:
+
+| Level | When | What you see |
+|---|---|---|
+| **Question** | known malware; `LD_PRELOAD` or `/etc/ld.so.preload`; downloads piped into a shell; reverse shells; SSH keys with forced commands; autostart entries, units or cron jobs that start something from `/tmp`, `/dev/shm` or `~/.cache` | a message with **Remove / Allow / Later** that stays on screen |
+| **Warning** | weaker signs: programs in hidden folders, embedded interpreter code, base64 blobs, background processes, `chmod +x`; and every new SSH key, sudo rule or library path | a short message; the event waits in the tray and the window until you decide |
+| **Hint** | nothing suspicious (a new alias in `.bashrc`, an app adding itself to autostart) | a short message; the change is accepted, and **Remove** in the history still undoes it |
 
 - **Allow** makes the new version the baseline.
 - **Remove** moves the new version into quarantine and puts the old version back (or deletes a
@@ -42,14 +219,12 @@ every change becomes an event:
 
 Deleted entries are recorded without a question. Changes undone before a decision close the
 event. A decision is refused if the entry changed again after the message was shown, so a
-click never allows something the person did not see.
+click never allows something the person did not see. A noted change can be undone until the
+entry changes again.
 
-New lines are checked against rules for typical persistence tricks: `LD_PRELOAD`, downloads
-piped into a shell, embedded interpreter code, base64 blobs, programs in `/tmp`, `/dev/shm`
-or hidden folders, reverse shells, background processes and SSH keys with forced commands.
-A match marks the event as suspicious and the message stays on screen.
+<a id="known-malware"></a>
 
-## Known malware (stage 2)
+## 🧬 Known malware
 
 New files in the download folder (`XDG_DOWNLOAD_DIR`, usually `~/Downloads`) are scanned once
 the browser has finished them. Programs that a new autostart entry or service starts are
@@ -71,7 +246,9 @@ A hit raises a "Malware detected" message. **Remove** moves the file into quaran
 **Allow** remembers its hash so it is not reported again. To check that everything works, put a
 file with the text `WACHPOSTEN-TEST-SIGNATURE-7f3a9c2e-NOT-MALWARE` into the download folder.
 
-## System daemon (stage 3)
+<a id="system-daemon"></a>
+
+## 🛡️ System daemon
 
 `wachposten-daemon` runs as root and cannot be stopped by malware running as a normal user.
 
@@ -117,19 +294,27 @@ sudo systemctl daemon-reload && sudo systemctl enable --now wachposten-daemon
 wachposten --system status
 ```
 
-## Window and ClamAV (stage 4)
+<a id="window-and-clamav"></a>
+
+## 🪟 Window and ClamAV
 
 `wachposten` without a command opens the window (Slint, follows the light or dark desktop
 theme, German or English). A click on the tray icon opens it too, on the alerts page when
 something waits. Pages:
 
-- **Overview** – what is watched, rules, hash list and ClamAV, open alerts
-- **Alerts** – open events of your agent and of the system daemon, with Allow and Remove
-- **History**, **Quarantine** (put back), **Allowed** (revoke an allowed file)
-- **Settings** – downloads, YARA-X, extra rule folders, Auth-Key, online lookup, ClamAV; saving
-  restarts the agent when it runs as a systemd user service
+- **Overview** – one state at the top (all quiet, protection limited, open or dangerous
+  alerts), cards for what is watched and for rules, hash list and ClamAV, recent activity
+- **Alerts** – open events of your agent and of the system daemon, dangerous ones first, with
+  Remove and Allow (End it and Let it run for ransomware)
+- **History** (harmless-looking changes can still be undone), **Quarantine** (put back),
+  **Allowed** (revoke an allowed file)
+- **Settings** – downloads, YARA-X, extra rule folders, ClamAV, decoy files, Auth-Key, online
+  lookup; saving restarts the agent when it runs as a systemd user service
 
 `wachposten window --tab alerts|history|quarantine|allowed|settings` opens a given page.
+
+The [screenshots](#screenshots) come from `test/screenshots.sh`, which renders the window with demo data and
+without a display (`wachposten window --screenshot file.png [--dark]`, hidden option).
 
 **ClamAV** is used when a `clamd` socket is found (Fedora, Debian and Arch locations, or
 `[clamav] socket` in the settings). Files are streamed to clamd, so it needs no access to them.
@@ -138,7 +323,23 @@ programs are left to YARA-X. ClamAV is skipped while a program start is held up.
 clamd socket belongs to the `virusgroup` group, so the agent needs that group or uses the
 daemon's scans.
 
-## eBPF and packages (stage 5)
+clamd may be installed or started at any time: the daemon and the agent look for it again every
+minute, and **Check again** on the overview does it at once. When clamd is installed but does
+not answer, the overview shows the commands that set it up. Fedora ships the socket line
+commented out and no virus signatures:
+
+```bash
+sudo sed -i '0,/^#LocalSocket /s//LocalSocket /' /etc/clamd.d/scan.conf
+sudo freshclam
+sudo systemctl enable --now clamav-freshclam clamd@scan
+```
+
+On Debian, Ubuntu and Arch: `sudo freshclam` and
+`sudo systemctl enable --now clamav-freshclam clamav-daemon`.
+
+<a id="ebpf"></a>
+
+## 🔬 eBPF
 
 The daemon loads a small eBPF program (C, `crates/daemon/bpf/`, built with clang and loaded
 with aya). It only uses syscall tracepoints with a fixed layout, so it needs no kernel headers
@@ -156,24 +357,51 @@ of the running kernel and no CO-RE; kernels from 5.8 on work.
 
 Without clang at build time the daemon is built without this part and says so at start.
 
-**RPM.** `packaging/build-rpm.sh` builds an RPM from the working tree with all crates vendored
-(offline build). It installs the three programs to `/usr/bin`, the daemon unit, a user unit,
-`/etc/wachposten/daemon.toml`, a menu entry and an XDG autostart entry for the agent.
+<a id="ransomware"></a>
+
+## 🔒 Ransomware
+
+Ransomware does not need to settle in: it encrypts the files and is done. The daemon's eBPF
+part therefore follows every write, rename and deletion in home folders (hidden folders such as
+`~/.cache` and build folders such as `target/` or `node_modules/` aside) and counts them per
+process, and also for its parent, so a script that runs one `gpg` or `openssl` per file is
+caught through the script.
+
+- **Rate, then content.** Only once a process changed 25 files within 20 seconds does the daemon
+  look at the files it wrote last. A `.pdf` that no longer starts with `%PDF`, a `.jpg` without a
+  JPEG header, a `.txt` full of random bytes, or many files renamed to the same new ending
+  (`report.pdf` → `report.pdf.locked`) mean encryption. Copying, unpacking or exporting many
+  files changes nothing about their content and stays quiet.
+- **Decoy files (optional).** In the window under Settings you can let the agent put a small
+  document (`!wachposten-koeder.docx`, or hidden `.wachposten-koeder.docx`) into the
+  documents, pictures, desktop and download folders. A program that changes, renames or deletes
+  one is stopped at once. Visible decoys catch more, since some ransomware skips hidden files.
+- **Stop and ask.** The process, and the other processes of the same program or script, are
+  stopped (`SIGSTOP`), and its owner is asked: **End it** kills them and moves the program or
+  script into quarantine; **Let it run** continues them and remembers the program so it is not
+  stopped again (a decoy hit always asks). Without an answer the processes stay stopped.
+  Programs of the system (`gpg`, `7z`, an interpreter like `python3`) are never quarantined or
+  allowed as a whole; the decision is about that one process. Session processes (`plasmashell`,
+  `gnome-shell`, `Xwayland` …) are only reported.
+- **Settings** in `/etc/wachposten/daemon.toml`, section `[ransomware]`: `files`,
+  `window_secs`, `action = "stop" | "report"`, and `ignore` for programs such as a backup tool.
+
+Detection takes a moment, so a few files (usually fewer than 30) are lost before the process is
+stopped. Only a backup or a snapshot brings them back. The status page therefore shows whether
+snapshots of `/home` are taken (snapper, Timeshift or btrbk). On Fedora, where `/home` is a
+btrfs subvolume, snapper does that:
 
 ```bash
-packaging/build-rpm.sh
-sudo dnf install target/rpm/RPMS/x86_64/wachposten-0.1.0-1.*.x86_64.rpm
-sudo systemctl enable --now wachposten-daemon
+sudo dnf install snapper
+sudo snapper -c home create-config /home
+sudo systemctl enable --now snapper-timeline.timer snapper-cleanup.timer
 ```
 
-## Usage
+Snapshots lie on the same disk; they do not replace a backup on another disk.
 
-```bash
-cargo install --path crates/agent
-cargo install --path crates/app
-install -Dm644 packaging/systemd/wachposten-agent.service ~/.config/systemd/user/wachposten-agent.service
-systemctl --user enable --now wachposten-agent
-```
+<a id="command-line"></a>
+
+## ⌨️ Command line
 
 ```
 wachposten status            # agent state, baseline size, open events
@@ -184,7 +412,10 @@ wachposten remove <id>
 wachposten quarantine
 wachposten restore <id> [--force]
 wachposten scan              # check now without the agent
-wachposten scan-file <files> # check files for known malware (exit code 1 on a hit)
+wachposten scan-file <files or folders> [--notify]   # known malware (exit code 1 on a hit)
+wachposten scan-file --home [--notify]               # the whole home folder, without tool caches
+wachposten export [--format csv|json] [-o file]      # history, yours and the system's
+wachposten integrate [--remove]                      # "Check with Wachposten" in file managers
 wachposten rules             # rule files and whether they compiled
 wachposten hashes status|update|import <file>
 wachposten config [show|set-key <key>|unset-key|online-lookup on|off|downloads on|off]
@@ -195,11 +426,44 @@ wachposten --system status|events [--all]|show <id>|allow <id>|remove <id>|quara
 Settings live in `$XDG_CONFIG_HOME/wachposten/config.toml` (mode 0600); restart the agent
 after changing them.
 
+Once a week the agent sums up what happened (changes noticed, dangerous ones, removed,
+allowed, still open) in a notification; `weekly_report = false` switches it off. The history
+page of the window exports CSV into the download folder; `wachposten export` writes CSV or
+JSON (cells that start like a spreadsheet formula are quoted, so they are not run).
+
 Data lives in `$XDG_DATA_HOME/wachposten` (`state.db`, `hashes.db`, `quarantine/`). Set
 `WACHPOSTEN_NO_CRONTAB=1` to switch crontab watching off. Messages are German when the locale
 starts with `de`, English otherwise.
 
-## Limits
+<a id="security"></a>
+
+## 🔐 Security of the daemon itself
+
+The daemon runs as root and listens to every local user, so it is built to be hard to turn
+against the system:
+
+- Callers are identified only by `SO_PEERCRED`. Non-admins decide only on their own program
+  starts and ransomware stops, and only on files that really are theirs (owned by them, no
+  symbolic link on the way). They see that a system location changed, but not what changed.
+- As root, Wachposten never deletes, overwrites or restores through a symbolic link in the
+  path, writes restored files through an exclusive, non-following temporary file, and judges
+  scripts by their real path, so a folder in `/tmp` that links to `/etc` cannot aim it at
+  `/etc/passwd`.
+- Stopping and ending processes is limited to processes of the same user. A script counts as
+  the culprit only if it belongs to that user; interpreters and system programs are never
+  quarantined or allowed as a whole. Session programs are recognised by their root-owned
+  program file, not by a name a process can choose.
+- One person's *Allow* applies to that person only.
+- Files sampled by the ransomware check are opened without following links and without
+  blocking, and only regular files are read.
+- At most 64 connections at once and 8 per user, short timeouts, at most 4 subscriptions per
+  user; the unit sets `UMask=0077`, `LimitNOFILE` and `TasksMax`.
+- Text from outside (paths, lines, process names) is escaped in notifications and stripped of
+  control characters in the terminal.
+
+<a id="limits"></a>
+
+## ⚠️ Limits
 
 - The agent runs as the user. Malware running as the same user can stop it or change its
   database. The root daemon covers system locations and program starts, but not yet the home
@@ -215,16 +479,24 @@ starts with `de`, English otherwise.
 - Removing an autostart entry does not stop a program that already runs.
 - Archives are not unpacked; only the archive itself is checked. ClamAV (stage 4) covers that.
 - Only the top level of the download folder is watched.
+- The ransomware check needs the eBPF part. Ransomware that encrypts slowly (fewer than 25
+  files in 20 seconds), only files without a recognisable type, or through many unrelated
+  processes is not caught by the rate; decoy files help there.
 
-## Roadmap
+<a id="roadmap"></a>
 
-1. **Persistence in the home directory** – agent, tray, notifications, CLI *(done)*
-2. **Downloads, hashes, YARA-X** – scan new downloads, local MalwareBazaar hash list (opt-in), curated YARA-X rules *(done)*
-3. **Daemon** – fanotify for program starts from `/tmp`, `/var/tmp`, `/dev/shm`, `~/.cache`; system locations such as `/etc/ld.so.preload`, `/etc/cron*`, `/etc/systemd/system` *(done)*
-4. **Slint window and ClamAV** – history, allowed entries, quarantine, settings; optional ClamAV via `clamd` *(done)*
-5. **eBPF and packages** – process starts through interpreters and `memfd`, which program changed a file, RPM *(done)*
+## 🗺️ Roadmap
 
-## Development
+- [x] **Stage 1 – Persistence in the home directory** – agent, tray, notifications, CLI
+- [x] **Stage 2 – Downloads, hashes, YARA-X** – scan new downloads, local MalwareBazaar hash list (opt-in), curated YARA-X rules
+- [x] **Stage 3 – Daemon** – fanotify for program starts from `/tmp`, `/var/tmp`, `/dev/shm`, `~/.cache`; system locations such as `/etc/ld.so.preload`, `/etc/cron*`, `/etc/systemd/system`
+- [x] **Stage 4 – Slint window and ClamAV** – history, allowed entries, quarantine, settings; optional ClamAV via `clamd`
+- [x] **Stage 5 – eBPF and packages** – process starts through interpreters and `memfd`, which program changed a file, RPM
+- [x] **Stage 6 – Ransomware** – mass encryption by rate and content, decoy files, stop and ask, snapshot status
+
+<a id="development"></a>
+
+## 🛠️ Development
 
 ```bash
 cargo test
@@ -232,18 +504,32 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-The workspace has `crates/core` (baseline, analysis, decisions, settings, IPC, SQLite),
-`crates/watch` (inotify), `crates/scan` (YARA-X, hash list, MalwareBazaar), `crates/daemon`
-(fanotify, system locations, socket), `crates/agent` (tray and notifications) and `crates/app`
-(CLI and the Slint window; texts in `ui/`, German in `translations/`).
+The crates are listed under [How it works](#how-it-works).
 
 `test/vm.py` boots a Fedora Cloud VM with QEMU (no root needed on the host), installs the
 daemon as a systemd service (or the RPM with `--rpm`) and checks blocking, program start
 reports, system persistence, rpm checks, eBPF and permissions with a second, non-admin user.
 
+`test/desktop-vm.py` is for trying it by hand: it builds a Fedora KDE Plasma VM once (about
+2 GB download, 15-20 minutes) with the newest RPM from `packaging/build-rpm.sh`, a German
+desktop, a user `anna` who is logged in automatically (password `wachposten` for sudo) and test
+scripts in `~/Tests` (autostart entries, a blocked test "malware", normal mass changes, a
+ransomware simulation, a decoy change). Later runs open the VM window right away and keep what
+happened inside; `--update` puts a newly built RPM in, `--reset` starts over.
+
+```bash
+packaging/build-rpm.sh
+test/desktop-vm.py
+```
+
 `yara-x` 1.23 does not build with the newest `rsa` release candidate, so `Cargo.lock` pins
 `rsa` to `0.10.0-rc.19`. Keep that pin when running `cargo update`.
 
-## License
+<a id="license"></a>
 
-GPL-3.0-or-later.
+## 📄 License
+
+Wachposten is free software under the [GNU General Public License v3.0 or later](LICENSE).
+Contributions are welcome, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+<div align="center"><sub>Made for people who just want their Linux desktop to stay theirs. 🐧</sub></div>

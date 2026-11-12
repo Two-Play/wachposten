@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use wachposten_core::i18n;
 use wachposten_core::ipc::{self, Reply, Request};
 use wachposten_core::settings::settings_path;
-use wachposten_core::{Config, Entry, Event, Guard, Outcome, Settings, Status};
+use wachposten_core::{Config, Entry, Event, Guard, Outcome, Settings};
 use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, bazaar, hash_db_path};
 
 #[derive(Parser)]
@@ -33,6 +33,12 @@ enum Command {
         /// Page to show first.
         #[arg(long, value_parser = ["overview", "alerts", "history", "quarantine", "allowed", "settings"])]
         tab: Option<String>,
+        /// Render the window into this image instead of showing it.
+        #[arg(long, hide = true)]
+        screenshot: Option<PathBuf>,
+        /// With --screenshot: use the dark colour scheme.
+        #[arg(long, hide = true)]
+        dark: bool,
     },
     /// Show whether the agent runs and how many entries and events there are.
     Status,
@@ -64,8 +70,31 @@ enum Command {
     Scan,
     /// Check files for known malware (YARA-X and the hash list) without recording anything.
     ScanFile {
-        #[arg(required = true)]
+        /// Files or folders (folders are checked with everything in them).
+        #[arg(required_unless_present = "home")]
         paths: Vec<PathBuf>,
+        /// Show the result as a desktop notification (for the file manager menus).
+        #[arg(long)]
+        notify: bool,
+        /// Check the whole home folder, without large caches of tools (~/.cache, Flatpak,
+        /// containers, Steam, Rust and npm caches).
+        #[arg(long, conflicts_with = "paths")]
+        home: bool,
+    },
+    /// Write the history (yours and, if the daemon runs, the system's) as CSV or JSON.
+    Export {
+        #[arg(long, value_parser = ["csv", "json"], default_value = "csv")]
+        format: String,
+        /// File to write; standard output if not given.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Add "Check with Wachposten" to the context menu of Dolphin and of GNOME Files for this
+    /// user (packages install it for everyone).
+    Integrate {
+        /// Remove it again.
+        #[arg(long)]
+        remove: bool,
     },
     /// Show the YARA-X rule files and whether they compiled.
     Rules,
@@ -138,7 +167,62 @@ pub(crate) fn agent_running(config: &Config) -> bool {
     matches!(file.try_lock(), Err(TryLockError::WouldBlock))
 }
 
+/// The history of this person and, if the daemon answers, of the system, newest first.
+pub fn export(guard: &Guard, format: &str) -> Result<String> {
+    let local = guard.store().recent_events(1_000_000)?;
+    let system = match ipc::call(
+        &socket_path(),
+        &Request::Events {
+            all: true,
+            limit: 1_000_000,
+        },
+    ) {
+        Ok(Reply::Events { events }) => events,
+        _ => Vec::new(),
+    };
+    let mut rows: Vec<_> = local
+        .iter()
+        .map(|e| (e.updated_at, wachposten_core::report::row(e, false)))
+        .chain(
+            system
+                .iter()
+                .map(|e| (e.updated_at, wachposten_core::report::row(e, true))),
+        )
+        .collect();
+    rows.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    let rows: Vec<_> = rows.into_iter().map(|(_, r)| r).collect();
+    Ok(if format == "json" {
+        wachposten_core::report::to_json(&rows)
+    } else {
+        wachposten_core::report::to_csv(&rows)
+    })
+}
+
+/// Replace control characters, so names chosen by a program cannot send escape sequences to
+/// the terminal (fake or hidden lines).
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .collect()
+}
+
+/// An event with every text that came from outside made safe for the terminal.
+fn printable(ev: &Event) -> Event {
+    let mut ev = ev.clone();
+    ev.path = clean(&ev.path);
+    ev.actor = ev.actor.as_deref().map(clean);
+    ev.added_lines = ev.added_lines.iter().map(|l| clean(l)).collect();
+    for f in &mut ev.findings {
+        f.line = clean(&f.line);
+    }
+    if let Some(Entry::Symlink { target, .. }) = &mut ev.new_entry {
+        *target = clean(target);
+    }
+    ev
+}
+
 fn print_event_line(home: &Path, ev: &Event) {
+    let ev = &printable(ev);
     println!(
         "{:>5}  {}  {:<10} {:<9} {:<10} {}",
         ev.id,
@@ -159,7 +243,7 @@ fn show(guard: &Guard, id: i64) -> Result<()> {
 }
 
 fn show_event(home: &Path, ev: &Event) {
-    let ev = ev.clone();
+    let ev = printable(ev);
     println!("Event {}: {}", ev.id, i18n::event_title(&ev));
     println!("  {}", i18n::event_sentence(&ev));
     println!("  path:     {}", pretty(home, &ev.path));
@@ -255,6 +339,8 @@ fn config_cmd(config: &Config, action: Option<ConfigAction>) -> Result<()> {
 }
 
 mod gui;
+mod scan;
+mod shot;
 
 fn has_display() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
@@ -290,7 +376,11 @@ fn system_cmd(command: Command) -> Result<()> {
                 yara_rules,
                 known_hashes,
                 clamav,
+                clamav_state,
                 ebpf,
+                ransomware,
+                home_btrfs,
+                snapshots,
             } = daemon(&Request::Status)?
             {
                 println!("daemon:         running");
@@ -312,14 +402,41 @@ fn system_cmd(command: Command) -> Result<()> {
                 println!("known hashes:   {known_hashes}");
                 println!(
                     "ClamAV:         {}",
-                    if clamav { "in use" } else { "not available" }
+                    match (clamav, clamav_state.as_str()) {
+                        (true, _) => "in use",
+                        (false, "not-running") =>
+                            "installed, but clamd does not answer; to set it up:",
+                        (false, "off") => "switched off",
+                        (false, _) => "not installed (optional)",
+                    }
                 );
+                if !clamav && clamav_state == "not-running" {
+                    for line in wachposten_scan::clamav::setup_commands().lines() {
+                        println!("                  {}", line.trim());
+                    }
+                }
                 println!(
                     "eBPF:           {}",
                     if ebpf {
                         "scripts, memory programs and writers watched"
                     } else {
                         "off"
+                    }
+                );
+                println!(
+                    "ransomware:     {}",
+                    if ransomware {
+                        "watched, such programs are stopped"
+                    } else {
+                        "off"
+                    }
+                );
+                println!(
+                    "snapshots:      {}",
+                    match (&snapshots, home_btrfs) {
+                        (Some(tool), _) => format!("/home by {tool}"),
+                        (None, true) => "none – set up snapper for /home (see README)".into(),
+                        (None, false) => "none – keep backups of your files (see README)".into(),
                     }
                 );
             }
@@ -337,7 +454,7 @@ fn system_cmd(command: Command) -> Result<()> {
         Command::Show { id } => {
             if let Reply::Event { event, can_decide } = daemon(&Request::Show { id })? {
                 show_event(root, &event);
-                if !can_decide && event.status == Status::Open {
+                if !can_decide && event.decidable() {
                     println!("\n(an admin decides about this event)");
                 }
             }
@@ -395,7 +512,7 @@ fn print_quarantine(home: &Path, items: &[wachposten_core::QuarantineItem]) {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.command.is_none() && !cli.system && has_display() {
-        return gui::run(None);
+        return gui::run(None, None, false);
     }
     if cli.system {
         return system_cmd(cli.command.unwrap_or(Command::Status));
@@ -405,7 +522,11 @@ fn main() -> Result<()> {
     let home = config.home.clone();
 
     match cli.command.unwrap_or(Command::Status) {
-        Command::Window { tab } => return gui::run(tab.as_deref()),
+        Command::Window {
+            tab,
+            screenshot,
+            dark,
+        } => return gui::run(tab.as_deref(), screenshot.as_deref(), dark),
         Command::Status => {
             let open = guard.store().open_events()?;
             println!(
@@ -460,22 +581,72 @@ fn main() -> Result<()> {
             let path = guard.restore(id, force)?;
             println!("restored {}", pretty(&home, &path));
         }
-        Command::ScanFile { paths } => {
+        Command::ScanFile {
+            paths,
+            notify,
+            home: whole_home,
+        } => {
             let settings = Settings::load(&home)?;
             let scanner = MalwareScanner::from_settings(&settings, &config.data_dir);
-            let mut hits = 0;
-            for path in &paths {
-                let detections = scanner.scan_path(path);
-                if detections.is_empty() {
-                    println!("clean     {}", path.display());
+            let (paths, skip) = if whole_home {
+                (vec![home.clone()], scan::home_skips(&home))
+            } else {
+                (paths, Vec::new())
+            };
+            let mut flagged = Vec::new();
+            let mut flagged_paths = Vec::new();
+            let report = scan::scan_paths_skipping(&scanner, &paths, &skip, |path, detections| {
+                if !detections.is_empty() {
+                    flagged.push(wachposten_scan::findings(path, detections.to_vec()));
+                    flagged_paths.push(path.to_path_buf());
                 }
-                for d in detections {
-                    hits += 1;
-                    println!("MALWARE   {}  {}", path.display(), d.label());
+                if detections.is_empty() {
+                    if !notify {
+                        println!("clean     {}", clean(&path.display().to_string()));
+                    }
+                } else {
+                    for d in detections {
+                        println!(
+                            "MALWARE   {}  {}",
+                            clean(&path.display().to_string()),
+                            d.label()
+                        );
+                    }
+                }
+            });
+            // Each hit becomes an alert with Remove and Allow, like a flagged download.
+            let mut events = Vec::new();
+            for (path, findings) in flagged_paths.iter().zip(&flagged) {
+                match guard.record_checked(path, findings) {
+                    Ok(Some(ev)) => events.push(ev),
+                    // Already an open alert from an earlier check, or allowed by the person.
+                    Ok(None) => {
+                        if let Ok(Some(ev)) = guard.store().open_event_for(&path.to_string_lossy())
+                        {
+                            events.push(ev);
+                        }
+                    }
+                    Err(e) => eprintln!("wachposten: cannot record {}: {e:#}", path.display()),
                 }
             }
-            if hits > 0 {
+            if notify {
+                scan::notify(&report, &mut guard, &events);
+            } else if report.skipped > 0 {
+                println!("({} files could not be read)", report.skipped);
+            }
+            if !report.hits.is_empty() {
                 std::process::exit(1);
+            }
+        }
+        Command::Integrate { remove } => scan::integrate(&home, remove)?,
+        Command::Export { format, output } => {
+            let text = export(&guard, &format)?;
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, text)?;
+                    println!("written to {}", path.display());
+                }
+                None => print!("{text}"),
             }
         }
         Command::Rules => {
@@ -520,7 +691,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let events = guard.rescan()?;
-            let open: Vec<_> = events.iter().filter(|e| e.status == Status::Open).collect();
+            let open: Vec<_> = events.iter().filter(|e| e.decidable()).collect();
             if open.is_empty() {
                 println!("no new changes");
             }

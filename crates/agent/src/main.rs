@@ -1,6 +1,7 @@
 //! `wachposten-agent`: watches the persistence locations in the home directory and asks the
 //! person at the computer about every new or changed entry.
 
+mod decoys;
 mod notify;
 mod tray;
 
@@ -79,12 +80,50 @@ struct Agent {
     remote: BTreeMap<i64, (Event, bool)>,
     /// Daemon events already shown, by id and state, so a reconnect does not repeat them.
     remote_seen: HashSet<(i64, String)>,
+    weekly_report: bool,
 }
 
+const WEEK: i64 = 7 * 86400;
+const LAST_REPORT: &str = "last_weekly_report";
+
 impl Agent {
+    /// Once a week, a short summary of what happened. The first week starts with the agent.
+    fn weekly_report(&self) -> Result<()> {
+        if !self.weekly_report {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        let store = self.guard.store();
+        let Some(last) = store.meta(LAST_REPORT)?.and_then(|v| v.parse::<i64>().ok()) else {
+            store.set_meta(LAST_REPORT, &now.to_string())?;
+            return Ok(());
+        };
+        if now - last < WEEK {
+            return Ok(());
+        }
+        let mut summary = wachposten_core::report::Summary::of(&store.events_since(last)?);
+        summary.open += self.remote.len();
+        let (title, text) = summary.weekly_text();
+        notify::info(&title, &text, "security-high");
+        store.set_meta(LAST_REPORT, &now.to_string())?;
+        Ok(())
+    }
+
+    /// Tell the person about new or changed events, as loud as each one deserves.
     fn ask(&self, events: &[Event]) {
         for ev in events {
-            notify::ask(&self.guard.config().home, ev, self.tx.clone(), false, true);
+            self.tell(ev, false, true);
+        }
+    }
+
+    fn tell(&self, ev: &Event, system: bool, can_decide: bool) {
+        let home = &self.guard.config().home;
+        if ev.wants_popup() {
+            notify::ask(home, ev, self.tx.clone(), system, can_decide);
+        } else if ev.decidable() {
+            notify::passive(home, ev, self.tx.clone(), system);
         }
     }
 
@@ -131,19 +170,16 @@ impl Agent {
     }
 
     fn remote_event(&mut self, ev: Event, can_decide: bool) -> Result<()> {
+        let key = (ev.id, ev.new_hash().to_string());
         if ev.status != Status::Open {
+            if ev.status == Status::Noted && self.remote_seen.insert(key) {
+                self.tell(&ev, true, can_decide);
+            }
             self.remote.remove(&ev.id);
             return self.refresh();
         }
-        let key = (ev.id, ev.new_hash().to_string());
         if self.remote_seen.insert(key) {
-            notify::ask(
-                &self.guard.config().home,
-                &ev,
-                self.tx.clone(),
-                true,
-                can_decide,
-            );
+            self.tell(&ev, true, can_decide);
         }
         self.remote.insert(ev.id, (ev, can_decide));
         self.refresh()
@@ -215,23 +251,42 @@ impl Agent {
         }
     }
 
+    /// Ask again about open events: questions only for the dangerous ones, a single line for
+    /// the rest that waits in the tray.
     fn show_open(&self) -> Result<()> {
+        let home = &self.guard.config().home;
+        let mut quiet = 0;
         for (ev, can) in self.remote.values() {
-            notify::ask(&self.guard.config().home, ev, self.tx.clone(), true, *can);
+            if ev.wants_popup() {
+                notify::ask(home, ev, self.tx.clone(), true, *can);
+            } else {
+                quiet += 1;
+            }
         }
-        let open = self.guard.store().open_events()?;
-        if open.len() > MAX_STARTUP_QUESTIONS {
+        let (loud, rest): (Vec<Event>, Vec<Event>) = self
+            .guard
+            .store()
+            .open_events()?
+            .into_iter()
+            .partition(Event::wants_popup);
+        quiet += rest.len();
+        let skipped = loud.len().saturating_sub(MAX_STARTUP_QUESTIONS);
+        for ev in &loud[skipped..] {
+            notify::ask(home, ev, self.tx.clone(), false, true);
+        }
+        if quiet + skipped > 0 {
             notify::info(
-                &format!("{} {}", open.len(), tr("offene Meldungen", "open alerts")),
+                &format!(
+                    "{} {}",
+                    quiet + skipped,
+                    tr("offene Meldungen", "open alerts")
+                ),
                 tr(
                     "Die Liste findest du im Tray-Menü oder mit „wachposten events“.",
                     "See the tray menu or run \"wachposten events\".",
                 ),
                 "security-medium",
             );
-            self.ask(&open[open.len() - MAX_STARTUP_QUESTIONS..]);
-        } else {
-            self.ask(&open);
         }
         Ok(())
     }
@@ -309,6 +364,11 @@ fn main() -> Result<()> {
         );
         Settings::default()
     });
+    match decoys::apply(&config.home, settings.decoys) {
+        Ok(0) => {}
+        Ok(n) => log::info!("{n} decoy files in place"),
+        Err(e) => log::warn!("cannot set up decoy files: {e:#}"),
+    }
     let scanner = Arc::new(MalwareScanner::from_settings(&settings, &config.data_dir));
     if let Some(yara) = &scanner.yara {
         log::info!("YARA-X: {} rules", yara.rule_count());
@@ -345,6 +405,7 @@ fn main() -> Result<()> {
     if let Some(key) = settings.hashes.malwarebazaar_auth_key.clone() {
         wachposten_scan::spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
     }
+    wachposten_scan::spawn_clamav_rechecks(scanner.clone());
 
     let tick_tx = tx.clone();
     thread::spawn(move || {
@@ -378,6 +439,7 @@ fn main() -> Result<()> {
         watch,
         remote: BTreeMap::new(),
         remote_seen: HashSet::new(),
+        weekly_report: settings.weekly_report,
     };
     // Changes made while the agent was not running.
     let offline = agent.guard.rescan()?;
@@ -390,7 +452,8 @@ fn main() -> Result<()> {
 
     for msg in rx {
         let result = match msg {
-            Msg::Changed | Msg::Tick | Msg::Rescan => agent.rescan(),
+            Msg::Tick => agent.weekly_report().and_then(|()| agent.rescan()),
+            Msg::Changed | Msg::Rescan => agent.rescan(),
             Msg::ShowOpen => agent.show_open(),
             Msg::OpenWindow => {
                 let alerts =

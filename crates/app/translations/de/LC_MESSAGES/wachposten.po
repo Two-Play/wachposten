@@ -142,8 +142,6 @@ msgstr "leer, erste Aktualisierung steht aus"
 msgid "in use for Windows files, Office, PDF and archives"
 msgstr "im Einsatz für Windows-Dateien, Office, PDF und Archive"
 
-msgid "not available – install and start clamd to use it"
-msgstr "nicht verfügbar – installiere und starte clamd"
 
 msgid "not watched"
 msgstr "nicht überwacht"
@@ -194,3 +192,131 @@ msgstr "Skripte, Programme aus dem Speicher, wer was ändert"
 
 msgid "watched with eBPF"
 msgstr "überwacht mit eBPF"
+
+msgid "Ransomware decoys"
+msgstr "Köderdateien gegen Erpressungs-Software"
+
+msgid "Small documents in your documents, pictures, desktop and download folders that nobody opens. The system daemon stops any program that changes one. Some ransomware skips hidden files, so visible decoys catch more."
+msgstr "Kleine Dokumente in deinen Ordnern Dokumente, Bilder, Schreibtisch und Downloads, die niemand öffnet. Der Systemdienst hält jedes Programm an, das eines davon verändert. Manche Erpressungs-Software überspringt versteckte Dateien, sichtbare Köder fangen also mehr."
+
+msgid "Off"
+msgstr "Aus"
+
+msgid "Visible files"
+msgstr "Sichtbare Dateien"
+
+msgid "Hidden files"
+msgstr "Versteckte Dateien"
+
+msgid "Ransomware"
+msgstr "Erpressungs-Software"
+
+msgid "watched, with decoy files; such programs are stopped"
+msgstr "überwacht, mit Köderdateien; solche Programme werden angehalten"
+
+msgid "watched; such programs are stopped"
+msgstr "überwacht; solche Programme werden angehalten"
+
+msgid "Snapshots of /home"
+msgstr "Snapshots von /home"
+
+msgid "taken by {}"
+msgstr "durch {}"
+
+msgid "none – set up snapper for /home, see the README"
+msgstr "keine – richte snapper für /home ein, siehe README"
+
+msgid "none – keep backups of your files"
+msgstr "keine – sichere deine Dateien regelmäßig"
+
+msgid "Dangerous"
+msgstr "Gefährlich"
+
+msgid "Unusual"
+msgstr "Ungewöhnlich"
+
+msgid "Looks harmless"
+msgstr "Sieht unbedenklich aus"
+
+msgid "Location"
+msgstr "Ort"
+
+msgid "End it"
+msgstr "Beenden"
+
+msgid "Undo"
+msgstr "Rückgängig machen"
+
+msgid "Let it run"
+msgstr "Weiterlaufen lassen"
+
+msgid "Protected"
+msgstr "Geschützt"
+
+msgid "Protection is limited"
+msgstr "Schutz eingeschränkt"
+
+msgid "Needs your attention"
+msgstr "Braucht deine Aufmerksamkeit"
+
+msgid "Please look at it now."
+msgstr "Bitte sieh es dir jetzt an."
+
+msgid "Nothing urgent. Decide when you have time."
+msgstr "Nichts Dringendes. Entscheide, wenn du Zeit hast."
+
+msgid "Neither the agent nor the system daemon is running."
+msgstr "Weder der Agent noch der System-Daemon läuft."
+
+msgid "The agent for your home folder is not running."
+msgstr "Der Agent für deinen persönlichen Ordner läuft nicht."
+
+msgid "The system daemon is not running: system locations, program starts and ransomware are not watched."
+msgstr "Der System-Daemon läuft nicht: Systemstellen, Programmstarts und Erpressungs-Software werden nicht überwacht."
+
+msgid "Your computer is watched. Nothing waits for a decision."
+msgstr "Dein Rechner wird überwacht. Nichts wartet auf eine Entscheidung."
+
+msgid "Recent activity"
+msgstr "Zuletzt"
+
+msgid "Show history"
+msgstr "Verlauf zeigen"
+
+msgid "Changes that wait for your decision. Remove puts the old state back; Allow makes the change the new normal."
+msgstr "Änderungen, die auf deine Entscheidung warten. Entfernen stellt den alten Stand wieder her, Erlauben macht die Änderung zum neuen Normalzustand."
+
+msgid "Everything Wachposten noticed. Changes that looked harmless can still be undone here."
+msgstr "Alles, was Wachposten bemerkt hat. Unbedenklich wirkende Änderungen lassen sich hier noch rückgängig machen."
+
+msgid "{n} dangerous alert"
+msgid_plural "{n} dangerous alerts"
+msgstr[0] "{n} gefährliche Meldung"
+msgstr[1] "{n} gefährliche Meldungen"
+
+msgid "Scan my files"
+msgstr "Meine Dateien prüfen"
+
+msgid "Export (CSV)"
+msgstr "Exportieren (CSV)"
+
+msgid "Weekly report as a notification"
+msgstr "Wochenbericht als Benachrichtigung"
+
+msgid "Check again"
+msgstr "Erneut prüfen"
+
+msgid "installed, but clamd does not run yet"
+msgstr "installiert, aber clamd läuft noch nicht"
+
+msgid "switched off in Settings"
+msgstr "in den Einstellungen ausgeschaltet"
+
+msgid "not installed (optional)"
+msgstr "nicht installiert (optional)"
+
+msgid "clamd is installed but does not answer. On most systems it needs virus signatures and has to be started once. In a terminal:"
+msgstr "clamd ist installiert, antwortet aber nicht. Meist fehlen noch die Virensignaturen und der Dienst muss einmal gestartet werden. Im Terminal:"
+
+msgid "Then press \"Check again\". Wachposten also looks for clamd by itself every minute."
+msgstr "Danach „Erneut prüfen“ drücken. Wachposten sucht clamd außerdem jede Minute von selbst."

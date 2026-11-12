@@ -14,6 +14,10 @@ wachposten-scan.workspace = true
 wachposten-watch.workspace = true
 anyhow.workspace = true
 ksni.workspace = true
+zip.workspace = true
 notify-rust.workspace = true
 log.workspace = true
 env_logger.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

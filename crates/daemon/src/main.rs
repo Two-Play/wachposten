@@ -4,6 +4,7 @@
 mod ebpf;
 mod exec;
 mod proc;
+mod ransom;
 mod server;
 mod users;
 
@@ -13,15 +14,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
 use wachposten_core::i18n::tr;
 use wachposten_core::ipc::{self, Decision, Reply, Request};
-use wachposten_core::settings::{DAEMON_SETTINGS, DaemonSettings, ExecPopup};
+use wachposten_core::settings::{DAEMON_SETTINGS, DaemonSettings, ExecPopup, RansomAction};
 use wachposten_core::{Config, Event, FileReport, Finding, Guard, Kind, Outcome, Severity, Status};
-use wachposten_scan::{HashDb, MalwareScanner, YaraEngine, hash_db_path};
+use wachposten_scan::{ClamState, HashDb, MalwareScanner, YaraEngine, hash_db_path};
 
 use crate::exec::{ExecReport, ExecStatus};
 use crate::server::Client;
@@ -52,6 +53,8 @@ pub enum Msg {
     Rescan,
     Tick,
     Exec(ExecReport),
+    /// A process seems to encrypt files (from the eBPF part).
+    Ransom(ransom::Alarm),
     Subscribe(Client),
     Request {
         uid: u32,
@@ -72,14 +75,51 @@ struct Daemon {
     ticks: u64,
     writers: ebpf::SharedWriters,
     ebpf: bool,
+    last_clamav_recheck: Option<Instant>,
 }
 
 fn can_see(ev: &Event, uid: u32, admin: bool) -> bool {
     admin || ev.uid.is_none() || ev.uid == Some(uid)
 }
 
+/// A non-admin decides only on a file that really is theirs: no symbolic link on the way, and
+/// owned by them. Programs from memory (`/proc/<pid>/exe`) are judged by the event's user.
+fn owns_program_file(path: &str, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if path.starts_with("/proc/") {
+        return true;
+    }
+    let p = Path::new(path);
+    match std::fs::symlink_metadata(p) {
+        // Already gone (it deleted itself): nothing will be touched on disk.
+        Err(_) => true,
+        Ok(m) => {
+            m.file_type().is_file()
+                && m.uid() == uid
+                && std::fs::canonicalize(p).is_ok_and(|real| real == p)
+        }
+    }
+}
+
+/// What a person sees of an event. Everybody learns that a system location changed, but only
+/// admins and the event's own user see what changed: added lines of a sudo rule or of another
+/// person's crontab, matched lines and the program behind it stay private.
+fn view(mut ev: Event, uid: u32, admin: bool) -> Event {
+    if !admin && ev.uid != Some(uid) {
+        ev.added_lines.clear();
+        ev.actor = None;
+        for f in &mut ev.findings {
+            f.line.clear();
+        }
+        if let Some(wachposten_core::Entry::File { content, .. }) = &mut ev.new_entry {
+            *content = None;
+        }
+    }
+    ev
+}
+
 fn can_decide(ev: &Event, uid: u32, admin: bool) -> bool {
-    admin || (ev.kind == Kind::TempExec && ev.uid == Some(uid))
+    admin || (ev.kind.is_program() && ev.uid == Some(uid))
 }
 
 fn shorten(s: &str, n: usize) -> String {
@@ -107,7 +147,7 @@ impl Daemon {
                 return true;
             }
             c.send(&Reply::Event {
-                event: ev.clone(),
+                event: view(ev.clone(), c.uid, c.admin),
                 can_decide: can_decide(&ev, c.uid, c.admin),
             })
         });
@@ -178,6 +218,123 @@ impl Daemon {
             }
         }
         self.rescan()
+    }
+
+    /// Stop a process that seems to encrypt files, together with the other processes of the
+    /// same program or script, and ask its owner.
+    fn ransom(&mut self, alarm: ransom::Alarm) -> Result<()> {
+        let pid = alarm.pid as i32;
+        let info = proc::info(pid);
+        if info.comm.is_empty() {
+            return Ok(()); // already gone
+        }
+        let mut target = proc::target_of(pid);
+        // A program of the system (gpg, openssl, 7z …) is not removed or allowed as a whole:
+        // decide on this one process.
+        if !target.starts_with("/proc") && wachposten_core::pkg::installed_unchanged(&target) {
+            target = PathBuf::from(format!("/proc/{pid}/exe"));
+        }
+        let decoy = matches!(alarm.reason, ransom::Reason::Decoy(_));
+        let cfg = &self.settings.ransomware;
+        if !decoy && cfg.ignore.iter().any(|p| p == &target) {
+            log::info!("ransomware check: {} is ignored", target.display());
+            return Ok(());
+        }
+        let mut pids = vec![pid];
+        if !target.starts_with("/proc") {
+            // Only processes of the same user: a match on another user's process is never
+            // reason enough to stop it.
+            pids.extend(
+                proc::processes_of_user(&target, info.uid)
+                    .into_iter()
+                    .filter(|p| *p != pid),
+            );
+        }
+        let protected = pids.iter().any(|p| proc::is_protected(*p));
+        let stop = cfg.action == RansomAction::Stop && !protected;
+        // Stop first: every second counts. An allowed program is continued right after.
+        if stop {
+            proc::signal_all(&pids, nix::sys::signal::Signal::SIGSTOP);
+        }
+        let mut details = vec![alarm.reason.describe()];
+        details.push(if stop {
+            format!(
+                "{}: {}",
+                tr("Angehalten", "Stopped"),
+                pids.iter()
+                    .map(|p| format!("PID {p}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            tr(
+                "Läuft weiter (nur gemeldet)",
+                "Still running (only reported)",
+            )
+            .to_string()
+        });
+        let mut who = format!(
+            "{} (PID {pid}, {})",
+            info.comm,
+            info.uid.map(users::name).unwrap_or_default()
+        );
+        if !info.cmdline.is_empty() {
+            who.push_str(&format!(" – {}", shorten(&info.cmdline, 160)));
+        }
+        if let (Some(ppid), Some(parent)) = (info.ppid, &info.parent_comm) {
+            who.push_str(&format!(" ← {parent} (PID {ppid})"));
+        }
+        details.push(format!("{}: {who}", tr("Prozess", "Process")));
+        details.push(format!(
+            "{} ({}):",
+            tr("Betroffene Dateien", "Affected files"),
+            alarm.count
+        ));
+        details.extend(
+            alarm
+                .files
+                .iter()
+                .take(5)
+                .map(|f| format!("  {}", f.display())),
+        );
+        let findings = [Finding {
+            rule: if decoy { "decoy" } else { "ransomware" }.into(),
+            line: alarm.reason.describe(),
+        }];
+        let event = self.guard.record_file(&FileReport {
+            path: &target,
+            kind: Kind::Ransomware,
+            severity: Severity::Malicious,
+            ask: true,
+            findings: &findings,
+            details: &details,
+            uid: info.uid,
+            even_if_allowed: decoy,
+        })?;
+        match event {
+            Some(ev) => {
+                log::warn!(
+                    "ransomware {}: {} ({}), stopped: {stop}",
+                    ev.id,
+                    target.display(),
+                    alarm.reason.describe()
+                );
+                self.push(&ev);
+            }
+            None if stop
+                && self
+                    .guard
+                    .store()
+                    .open_event_for(&target.to_string_lossy())?
+                    .is_none() =>
+            {
+                // Allowed before (a backup tool, say): let it go on.
+                log::info!("ransomware check: {} was allowed before", target.display());
+                proc::signal_all(&pids, nix::sys::signal::Signal::SIGCONT);
+            }
+            None => {}
+        }
+        Ok(())
     }
 
     fn exec(&mut self, report: ExecReport) -> Result<()> {
@@ -264,6 +421,7 @@ impl Daemon {
             findings: &findings,
             details: &details,
             uid,
+            even_if_allowed: false,
         })?;
         if let Some(ev) = event {
             if ev.status == Status::Open {
@@ -282,6 +440,11 @@ impl Daemon {
     }
 
     fn subscribe(&mut self, mut client: Client) {
+        let mine = self.clients.iter().filter(|c| c.uid == client.uid).count();
+        if mine >= server::MAX_SUBSCRIBERS_PER_USER {
+            log::warn!("too many subscriptions of uid {}", client.uid);
+            return;
+        }
         let hello = Reply::Hello {
             version: env!("CARGO_PKG_VERSION").into(),
             admin: client.admin,
@@ -293,7 +456,7 @@ impl Daemon {
             if can_see(&ev, client.uid, client.admin)
                 && !client.send(&Reply::Event {
                     can_decide: can_decide(&ev, client.uid, client.admin),
-                    event: ipc::strip(ev),
+                    event: view(ipc::strip(ev), client.uid, client.admin),
                 })
             {
                 return;
@@ -321,31 +484,34 @@ impl Daemon {
             Request::Subscribe => Reply::Error {
                 message: "subscribe on a connection of its own".into(),
             },
-            Request::Status => Reply::Status {
-                baseline: self.guard.store().baseline_count()?,
-                open: self
-                    .guard
-                    .store()
-                    .open_events()?
-                    .iter()
-                    .filter(|e| can_see(e, uid, admin))
-                    .count() as i64,
-                exec_watch: self.exec.watching,
-                blocking: self.exec.blocking,
-                yara_rules: self.scanner.yara.as_ref().map_or(0, YaraEngine::rule_count),
-                known_hashes: self
-                    .scanner
-                    .hashes
-                    .as_ref()
-                    .and_then(|h| h.count().ok())
-                    .unwrap_or(0),
-                clamav: self
-                    .scanner
-                    .clamav
-                    .as_ref()
-                    .is_some_and(|c| c.ping().is_ok()),
-                ebpf: self.ebpf,
-            },
+            Request::Status => {
+                let snapshots = ransom::home_snapshots();
+                Reply::Status {
+                    baseline: self.guard.store().baseline_count()?,
+                    open: self
+                        .guard
+                        .store()
+                        .open_events()?
+                        .iter()
+                        .filter(|e| can_see(e, uid, admin))
+                        .count() as i64,
+                    exec_watch: self.exec.watching,
+                    blocking: self.exec.blocking,
+                    yara_rules: self.scanner.yara.as_ref().map_or(0, YaraEngine::rule_count),
+                    known_hashes: self
+                        .scanner
+                        .hashes
+                        .as_ref()
+                        .and_then(|h| h.count().ok())
+                        .unwrap_or(0),
+                    clamav: self.scanner.clamav_state() == ClamState::Running,
+                    clamav_state: self.scanner.clamav_state().as_str().to_string(),
+                    ebpf: self.ebpf,
+                    ransomware: self.ebpf && self.settings.ransomware.enabled,
+                    home_btrfs: snapshots.0,
+                    snapshots: snapshots.1.map(str::to_string),
+                }
+            }
             Request::WhoWrote { paths } => {
                 let home = users::home(uid);
                 let writers = self.writers.lock().unwrap_or_else(|e| e.into_inner());
@@ -360,6 +526,19 @@ impl Daemon {
                                 .flatten()
                         })
                         .collect(),
+                }
+            }
+            Request::RecheckClamav => {
+                // A ping to clamd; cheap, but not more often than every few seconds.
+                if self
+                    .last_clamav_recheck
+                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
+                {
+                    self.last_clamav_recheck = Some(Instant::now());
+                    self.scanner.recheck_clamav();
+                }
+                Reply::Done {
+                    message: self.scanner.clamav_state().as_str().to_string(),
                 }
             }
             Request::Allowlist => Reply::Allowlist {
@@ -392,14 +571,14 @@ impl Daemon {
                     events: events
                         .into_iter()
                         .filter(|e| can_see(e, uid, admin))
-                        .map(ipc::strip)
+                        .map(|e| view(ipc::strip(e), uid, admin))
                         .collect(),
                 }
             }
             Request::Show { id } => match self.guard.store().event(id)? {
                 Some(ev) if can_see(&ev, uid, admin) => Reply::Event {
                     can_decide: can_decide(&ev, uid, admin),
-                    event: ipc::strip(ev),
+                    event: view(ipc::strip(ev), uid, admin),
                 },
                 _ => Reply::Error {
                     message: format!("event {id} does not exist"),
@@ -416,10 +595,27 @@ impl Daemon {
                         message: "only admins may decide on this".into(),
                     });
                 }
+                if !admin && !owns_program_file(&ev.path, uid) {
+                    return Ok(Reply::Error {
+                        message: "only admins may decide on files of other users".into(),
+                    });
+                }
                 let outcome = match decision {
-                    Decision::Allow => self.guard.allow(id, hash.as_deref())?,
+                    Decision::Allow => {
+                        let outcome = self.guard.allow(id, hash.as_deref())?;
+                        if ev.kind == Kind::Ransomware {
+                            let pids = proc::processes_of_user(Path::new(&ev.path), ev.uid);
+                            let n = proc::signal_all(&pids, nix::sys::signal::Signal::SIGCONT);
+                            log::info!("continued {n} processes of {}", ev.path);
+                        }
+                        outcome
+                    }
                     Decision::Remove => {
-                        if ev.kind == Kind::TempExec {
+                        if ev.kind == Kind::Ransomware {
+                            let pids = proc::processes_of_user(Path::new(&ev.path), ev.uid);
+                            let n = proc::signal_all(&pids, nix::sys::signal::Signal::SIGKILL);
+                            log::info!("ended {n} processes of {}", ev.path);
+                        } else if ev.kind == Kind::TempExec {
                             let n = proc::kill_program(Path::new(&ev.path));
                             log::info!("ended {n} processes of {}", ev.path);
                         }
@@ -526,7 +722,15 @@ fn main() -> Result<()> {
     let writers = ebpf::SharedWriters::default();
     let ebpf_on = settings.exec.ebpf
         && !args.no_exec
-        && match ebpf::start(tx.clone(), scanner.clone(), writers.clone()) {
+        && match ebpf::start(
+            tx.clone(),
+            scanner.clone(),
+            writers.clone(),
+            settings.ransomware.enabled.then(|| ransom::Limits {
+                files: settings.ransomware.files.max(5),
+                window: Duration::from_secs(settings.ransomware.window_secs.max(2)),
+            }),
+        ) {
             Ok(()) => true,
             Err(e) => {
                 log::warn!("{e:#}; scripts, memory programs and writers are not watched");
@@ -537,6 +741,7 @@ fn main() -> Result<()> {
     if let Some(key) = settings.hashes.malwarebazaar_auth_key.clone() {
         wachposten_scan::spawn_hash_updates(scanner.clone(), key, settings.hashes.update_hours);
     }
+    wachposten_scan::spawn_clamav_rechecks(scanner.clone());
 
     server::listen(&args.socket, settings.admin_groups.clone(), tx.clone())?;
 
@@ -561,6 +766,7 @@ fn main() -> Result<()> {
         ticks: 0,
         writers,
         ebpf: ebpf_on,
+        last_clamav_recheck: None,
     };
     daemon.rescan()?;
     log::info!("listening on {}", args.socket.display());
@@ -571,6 +777,7 @@ fn main() -> Result<()> {
             Msg::Rescan => daemon.rescan(),
             Msg::Tick => daemon.tick(),
             Msg::Exec(report) => daemon.exec(report),
+            Msg::Ransom(alarm) => daemon.ransom(alarm),
             Msg::Subscribe(client) => {
                 daemon.subscribe(client);
                 Ok(())

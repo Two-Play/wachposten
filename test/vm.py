@@ -255,10 +255,11 @@ WantedBy=multi-user.target
 EOF
 systemctl enable evil.service""")
         unit = wait_for(lambda: find(events(vm, "fedora"), "/etc/systemd/system/evil.service", "open"))
-        link = wait_for(lambda: find(events(vm, "fedora"),
-                                     "/etc/systemd/system/multi-user.target.wants/evil.service", "open"))
+        # The link itself looks harmless: it is only noted, but can still be removed.
+        link = wait_for(lambda: find(events(vm, "fedora", all_=True),
+                                     "/etc/systemd/system/multi-user.target.wants/evil.service", "noted"))
         check("new system service raises a question", unit and unit["severity"] == "suspicious", unit)
-        check("enablement link raises a question", link is not None, link)
+        check("enablement link is noted", link is not None, link)
         seen = find(events(vm, "gast"), "/etc/systemd/system/evil.service", "open")
         check("non-admin sees system events", seen is not None)
         if unit:
@@ -332,6 +333,11 @@ systemctl enable evil.service""")
         if ev:
             r = vm.as_user("fedora", f"wachposten --system show {ev['id']}")
             check("the event names the writing program", "changed by: python3" in r.stdout, r.stdout)
+        vm.sh("mkdir -p /etc/dnf/libdnf5-plugins/actions.d && printf 'post_transaction:::/bin/sh /tmp/.p/run\\n' > /etc/dnf/libdnf5-plugins/actions.d/x.actions")
+        ev = wait_for(lambda: find(events(vm, "fedora"), "/etc/dnf/libdnf5-plugins/actions.d/x.actions", "open"))
+        check("package manager hook running from /tmp raises a question", ev and ev["severity"] == "suspicious", ev)
+        if ev:
+            vm.as_user("fedora", f"wachposten --system remove {ev['id']}")
         vm.as_user("gast", """mkdir -p ~/.config/autostart && python3 -c "import os; open(os.path.expanduser('~/.config/autostart/x.desktop'),'w').write('[Desktop Entry]\\n')" """)
         time.sleep(2)
         who = """import json,socket,sys
@@ -347,6 +353,135 @@ print(s.makefile().readline())"""
         check("agent may ask who wrote its own files", len(writers) == 2 and writers[0] and "python3" in writers[0],
               r.stdout + r.stderr)
         check("but not about system files", len(writers) == 2 and writers[1] is None, r.stdout)
+
+        print("ransomware", flush=True)
+        r = vm.as_user("fedora", "wachposten --system status")
+        check("status: ransomware check on", "watched, such programs are stopped" in r.stdout, r.stdout + r.stderr)
+        files = """import os
+d = os.path.expanduser("~/Dokumente")
+os.makedirs(d, exist_ok=True)
+os.makedirs(os.path.expanduser("~/Bilder"), exist_ok=True)
+for i in range(100):
+    open(f"{d}/brief{i:03}.txt", "w").write(("Liebe Anna, viele Gruesse. " * 60) + "\\n")
+    open(f"{d}/rechnung{i:03}.pdf", "wb").write(b"%PDF-1.7\\n" + b"1 0 obj << >> endobj\\n" * 100)
+"""
+        harmless = """import os
+e = os.path.expanduser("~/Bilder/export")
+os.makedirs(e, exist_ok=True)
+for i in range(100):
+    open(f"{e}/foto{i:03}.jpg", "wb").write(b"\\xff\\xd8\\xff\\xe0" + os.urandom(8000))
+d = os.path.expanduser("~/Kopie")
+for n in sorted(os.listdir(d))[:60]:
+    if n.endswith(".txt"):
+        open(os.path.join(d, n), "w").write("Neuer Text. " * 100)
+"""
+        encrypt = """import os, time
+d = os.path.expanduser("~/Dokumente")
+for n in sorted(os.listdir(d)):
+    p = os.path.join(d, n)
+    data = open(p, "rb").read()
+    with open(p + ".locked", "wb") as f:
+        f.write(os.urandom(max(len(data), 1024)))
+    os.unlink(p)
+    time.sleep(0.02)
+time.sleep(300)
+"""
+        for name, text in [("mkfiles.py", files), ("harmless.py", harmless), ("enc.py", encrypt)]:
+            vm.sh(f"cat > /home/gast/{name} <<'EOF'\n{text}EOF\nchown gast: /home/gast/{name}")
+        vm.as_user("gast", "python3 ~/mkfiles.py")
+        r = vm.as_user("gast", """set -e
+cp -r ~/Dokumente ~/Kopie
+tar cf ~/a.tar -C ~ Dokumente && mkdir -p ~/Entpackt && tar xf ~/a.tar -C ~/Entpackt
+for f in ~/Entpackt/Dokumente/*.txt; do mv "$f" "$f.bak"; done
+python3 ~/harmless.py""", timeout=300)
+        check("harmless mass changes ran", r.returncode == 0, r.stdout + r.stderr)
+        time.sleep(3)
+        r = vm.sh("journalctl -u wachposten-daemon --no-pager | grep 'ransomware check' || true")
+        check("copying, unpacking, renaming and exporting raise no alarm", r.stdout.strip() == "", r.stdout[-800:])
+
+        vm.as_user("gast", "nohup python3 ~/enc.py >/dev/null 2>&1 &")
+        ev = wait_for(lambda: find(events(vm, "gast"), "/home/gast/enc.py", "open"), timeout=40)
+        check("encrypting script raises a question", ev and ev["severity"] == "malicious", ev)
+        pid = vm.sh("pgrep -f 'python3 /home/gast/enc.py' | head -1").stdout.strip()
+        state = vm.sh(f"awk '{{print $3}}' /proc/{pid}/stat 2>/dev/null").stdout.strip() if pid else ""
+        check("and it is stopped", state == "T", f"pid {pid!r} state {state!r}")
+        time.sleep(2)
+        locked = vm.as_user("gast", "ls ~/Dokumente | grep -c '\\.locked$' || true").stdout.strip()
+        check("fewer than 40 files were encrypted", locked.isdigit() and int(locked) < 40, locked)
+        if ev:
+            r = vm.as_user("gast", f"wachposten --system show {ev['id']}")
+            check("the event names the reason", "look encrypted" in r.stdout or "renamed to" in r.stdout, r.stdout)
+            r = vm.as_user("gast", f"wachposten --system remove {ev['id']}")
+            gone = vm.sh(f"kill -0 {pid} 2>/dev/null && echo alive || echo gone").stdout.strip() if pid else "gone"
+            check("End it kills the process and quarantines the script",
+                  r.returncode == 0 and gone == "gone" and vm.sh("test -e /home/gast/enc.py").returncode != 0,
+                  r.stdout + r.stderr + gone)
+
+        vm.as_user("gast", "ln ~/Kopie/rechnung000.pdf ~/Bilder/'!wachposten-koeder.docx'")
+        vm.as_user("gast", """nohup python3 -c 'import time; f = open("/home/gast/Bilder/!wachposten-koeder.docx", "r+b"); f.write(b"X"); f.close(); time.sleep(300)' >/dev/null 2>&1 &""")
+        dec = wait_for(lambda: next((e for e in events(vm, "gast")
+                                     if re.match(r"/proc/\d+/exe$", e["path"]) and e["status"] == "open"
+                                     and e["severity"] == "malicious"), None))
+        check("changing a decoy file raises a question at once", dec is not None, dec)
+        if dec:
+            dpid = re.match(r"/proc/(\d+)/exe", dec["path"]).group(1)
+            state = vm.sh(f"awk '{{print $3}}' /proc/{dpid}/stat").stdout.strip()
+            check("the decoy changer is stopped", state == "T", state)
+            r = vm.as_user("gast", f"wachposten --system allow {dec['id']}")
+            time.sleep(1)
+            state = vm.sh(f"awk '{{print $3}}' /proc/{dpid}/stat").stdout.strip()
+            check("Let it run continues it", r.returncode == 0 and state in ("S", "R"), r.stdout + r.stderr + state)
+            r = vm.as_user("fedora", """python3 -c 'import json,socket; s=socket.socket(socket.AF_UNIX); s.connect("/run/wachposten/daemon.sock"); s.sendall(b"{\\"request\\":\\"allowlist\\"}\\n"); print(s.makefile().readline())'""")
+            check("the interpreter is not allowed as a whole",
+                  '"reply":"allowlist"' in r.stdout.replace(" ", "") and "python3" not in r.stdout, r.stdout + r.stderr)
+            vm.sh(f"kill {dpid}")
+
+        # Load: many small writes in a home folder go through the ransomware check.
+        dpid = vm.sh("systemctl show -p MainPID --value wachposten-daemon").stdout.strip()
+        cpu = lambda: sum(int(x) for x in vm.sh(f"awk '{{print $14, $15}}' /proc/{dpid}/stat").stdout.split())
+        before, t0 = cpu(), time.time()
+        r = vm.as_user("gast", """python3 -c '
+import os
+d = os.path.expanduser("~/last")
+os.makedirs(d, exist_ok=True)
+for i in range(20000):
+    open(f"{d}/n{i}.txt", "w").write("Zeile\\n" * 20)
+for i in range(0, 20000, 2):
+    open(f"{d}/n{i}.txt", "w").write("neu\\n" * 20)
+print(20000)' && rm -rf ~/last""", timeout=600)
+        time.sleep(3)  # let the daemon drain its queue
+        wall = time.time() - t0
+        used = (cpu() - before) / os.sysconf("SC_CLK_TCK")
+        print(f"   load: {r.stdout.split()[0] if r.stdout.split() else '?'} files written, half rewritten and deleted in {wall:.1f} s, "
+              f"daemon used {used:.1f} s CPU", flush=True)
+        check("daemon keeps up with many writes (under half a CPU)", r.returncode == 0 and used < wall * 0.5,
+              f"{used:.1f} s CPU in {wall:.1f} s")
+        r = vm.sh("journalctl -u wachposten-daemon --no-pager | grep 'ransomware check' | grep -vE 'enc.py|koeder|look encrypted|renamed to' || true")
+        alarms = vm.sh("journalctl -u wachposten-daemon --no-pager | grep -c 'ransomware check: process' || true").stdout.strip()
+        check("the copy raised no alarm (only the attack and the decoy did)", alarms == "2", alarms + r.stdout[-500:])
+
+        print("attacks on the daemon", flush=True)
+        # A folder in /tmp that links to /etc must not let a user aim root at /etc files.
+        vm.as_user("gast", "mkdir -p /tmp/.d && ln -sfn /etc /tmp/.d/e && bash /tmp/.d/e/hostname >/dev/null 2>&1; true")
+        time.sleep(3)
+        rows = events(vm, "gast", all_=True)
+        check("a script path through a linked folder is not taken for a /tmp script",
+              not [e for e in rows if "/tmp/.d/e" in e["path"] or e["path"] == "/etc/hostname"], rows[:5])
+        flood = """import socket, time
+socks = []
+for _ in range(60):
+    try:
+        s = socket.socket(socket.AF_UNIX); s.connect("/run/wachposten/daemon.sock"); socks.append(s)
+    except OSError:
+        pass
+time.sleep(20)
+"""
+        vm.sh(f"cat > /usr/local/bin/wp-flood.py <<'EOF'\n{flood}EOF")
+        vm.as_user("gast", "nohup python3 /usr/local/bin/wp-flood.py >/dev/null 2>&1 &")
+        time.sleep(3)
+        r = vm.as_user("fedora", "wachposten --system status")
+        check("a user holding many connections does not lock others out", r.returncode == 0 and "daemon:" in r.stdout,
+              r.stdout + r.stderr)
 
         print("package changes are not questioned", flush=True)
         r = vm.sh("dnf -y -q install --allowerasing vim-default-editor 2>&1 | tail -3; ls /etc/profile.d/ | grep -i editor",

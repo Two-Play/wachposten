@@ -3,8 +3,8 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, symlink};
+use std::io::{self, Write as _};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -120,6 +120,8 @@ pub struct FileReport<'a> {
     /// Extra lines shown with the event, such as the process that started a program.
     pub details: &'a [String],
     pub uid: Option<u32>,
+    /// Report it even if the person allowed this file before (a changed decoy file).
+    pub even_if_allowed: bool,
 }
 
 pub fn severity_for(findings: &[Finding]) -> Severity {
@@ -237,6 +239,7 @@ impl Guard {
                     }
                     continue;
                 }
+                s.close_noted(path)?;
 
                 let kind = cur
                     .or(base)
@@ -301,6 +304,13 @@ impl Guard {
 
                 let added = analyze::added_lines(base_entry, cur_entry);
                 let mut findings = analyze::findings(kind, cur_entry, &added);
+                if path == "/etc/ld.so.preload" && !added.is_empty() {
+                    // Every library listed there is loaded into every program.
+                    findings.push(Finding {
+                        rule: "preload".into(),
+                        line: added[0].chars().take(300).collect(),
+                    });
+                }
                 if let Some(scanner) = &self.scanner {
                     if path != CRONTAB_PATH && matches!(cur_entry, Entry::File { .. }) {
                         findings.extend(scanner.scan(Path::new(path)));
@@ -310,6 +320,14 @@ impl Guard {
                     }
                 }
                 let severity = severity_for(&findings);
+                // Nothing looked dangerous: accept it right away, keep the old state so the
+                // person can still undo it, and only show a short hint.
+                let noted =
+                    findings.is_empty() && analyze::may_note(kind, path, base_entry.is_none());
+                if noted && let Some(ev) = &open {
+                    // The dangerous part of an earlier version is gone again.
+                    s.resolve_event(ev.id, Status::Reverted, None)?;
+                }
                 let new = NewEvent {
                     path,
                     kind,
@@ -319,7 +337,7 @@ impl Guard {
                         Change::Created
                     },
                     severity,
-                    status: Status::Open,
+                    status: if noted { Status::Noted } else { Status::Open },
                     old_hash: hash_of(base_entry),
                     new_entry: Some(cur_entry),
                     findings: &findings,
@@ -327,12 +345,16 @@ impl Guard {
                     uid: None,
                 };
                 let id = match open {
-                    Some(ev) => {
+                    Some(ev) if !noted => {
                         s.update_event(ev.id, &new)?;
                         ev.id
                     }
-                    None => s.insert_event(&new)?,
+                    _ => s.insert_event(&new)?,
                 };
+                if noted {
+                    s.set_old_entry(id, base_entry)?;
+                    s.set_baseline(path, kind, Some(cur_entry))?;
+                }
                 changed_ids.push(id);
             }
             Ok(())
@@ -350,17 +372,32 @@ impl Guard {
     /// Record a file in a download folder that a malware scanner flagged. Returns the event if
     /// it is new; files the person allowed before and repeats are ignored.
     pub fn record_detection(&mut self, path: &Path, findings: &[Finding]) -> Result<Option<Event>> {
+        self.record_flagged(path, Kind::Download, findings)
+    }
+
+    /// Like [`record_detection`](Self::record_detection) for a file the person had checked.
+    pub fn record_checked(&mut self, path: &Path, findings: &[Finding]) -> Result<Option<Event>> {
+        self.record_flagged(path, Kind::Checked, findings)
+    }
+
+    fn record_flagged(
+        &mut self,
+        path: &Path,
+        kind: Kind,
+        findings: &[Finding],
+    ) -> Result<Option<Event>> {
         if findings.is_empty() {
             return Ok(None);
         }
         self.record_file(&FileReport {
             path,
-            kind: Kind::Download,
+            kind,
             severity: severity_for(findings),
             ask: true,
             findings,
             details: &[],
             uid: None,
+            even_if_allowed: false,
         })
     }
 
@@ -375,7 +412,7 @@ impl Guard {
             // Programs and malware are not kept in the database.
             *content = None;
         }
-        if self.store.is_allowed_hash(entry.hash())? {
+        if !report.even_if_allowed && self.store.is_allowed_for(entry.hash(), report.uid)? {
             return Ok(None);
         }
         let path_str = report.path.to_string_lossy().into_owned();
@@ -416,7 +453,7 @@ impl Guard {
     /// stay open: malware often deletes itself after starting, and its process may still run.
     fn prune_downloads(&mut self) -> Result<()> {
         for ev in self.store.open_events()? {
-            if ev.kind != Kind::Download {
+            if !matches!(ev.kind, Kind::Download | Kind::Checked) {
                 continue;
             }
             let current = targets::read_entry(Path::new(&ev.path)).ok().flatten();
@@ -440,14 +477,14 @@ impl Guard {
     /// Load an open event and check that the entry on disk still is what the person saw.
     fn check_decision(&self, id: i64, seen_hash: Option<&str>) -> Result<Event> {
         let ev = self.store.event(id)?.ok_or(DecisionError::NotFound(id))?;
-        if ev.status != Status::Open {
+        if !ev.decidable() {
             bail!(DecisionError::AlreadyResolved(id));
         }
         if seen_hash.is_some_and(|h| h != ev.new_hash()) {
             bail!(DecisionError::Stale);
         }
         let current = self.current_entry(&ev.path)?;
-        let gone_program = ev.kind == Kind::TempExec && current.is_none();
+        let gone_program = ev.kind.is_program() && current.is_none();
         if hash_of(current.as_ref()) != ev.new_hash() && !gone_program {
             bail!(DecisionError::Stale);
         }
@@ -458,8 +495,18 @@ impl Guard {
     pub fn allow(&mut self, id: i64, seen_hash: Option<&str>) -> Result<Outcome> {
         let ev = self.check_decision(id, seen_hash)?;
         self.store.transaction(|s| {
+            // A process without a file of its own (`/proc/<pid>/exe`) may be an interpreter
+            // or a program from memory: allowing it must not allow that program everywhere.
+            let own_file = !(ev.kind == Kind::Ransomware && ev.path.starts_with("/proc/"));
             if ev.kind.is_file_report() {
-                s.allow_hash(ev.new_hash(), &ev.path)?;
+                match (own_file, ev.uid) {
+                    // The daemon: a program of one user is allowed for that user only.
+                    (true, Some(uid)) if self.config.system => {
+                        s.allow_hash_for(ev.new_hash(), &ev.path, uid)?
+                    }
+                    (true, _) => s.allow_hash(ev.new_hash(), &ev.path)?,
+                    (false, _) => {}
+                }
             } else {
                 s.set_baseline(&ev.path, ev.kind, ev.new_entry.as_ref())?;
             }
@@ -472,9 +519,24 @@ impl Guard {
     /// Undo the change: move the new version into quarantine and put the baseline back.
     pub fn remove(&mut self, id: i64, seen_hash: Option<&str>) -> Result<Outcome> {
         let ev = self.check_decision(id, seen_hash)?;
+        if self.config.system && !ev.path.starts_with("/proc/") {
+            // As root, never act through a symbolic link in the path: a user could point a
+            // folder of theirs at /etc and have root delete or overwrite files there.
+            no_symlinked_dirs(Path::new(&ev.path))?;
+            if ev.kind.is_file_report()
+                && fs::symlink_metadata(&ev.path).is_ok_and(|m| !m.file_type().is_file())
+            {
+                bail!("{} is not a regular file", ev.path);
+            }
+        }
         let new_entry = ev.new_entry.clone().context("event has no new state")?;
         let baseline = if ev.kind.is_file_report() {
             None
+        } else if ev.status == Status::Noted {
+            // The change is already in the baseline; go back to what was there before.
+            self.store
+                .old_entry(ev.id)?
+                .ok_or_else(|| DecisionError::CannotRestore(ev.path.clone()))?
         } else {
             self.store.baseline_entry(&ev.path)?
         };
@@ -484,7 +546,7 @@ impl Guard {
 
         // The program deleted itself, or ran from memory (/proc/<pid>/exe): there is no file to
         // keep, and the caller ended its processes.
-        if ev.kind == Kind::TempExec
+        if ev.kind.is_program()
             && (fs::symlink_metadata(&ev.path).is_err() || ev.path.starts_with("/proc/"))
         {
             self.store.resolve_event(ev.id, Status::Removed, None)?;
@@ -515,6 +577,9 @@ impl Guard {
             }
         }
         self.store.transaction(|s| {
+            if ev.status == Status::Noted {
+                s.set_baseline(&ev.path, ev.kind, baseline.as_ref())?;
+            }
             s.resolve_event(ev.id, Status::Removed, Some(qid))?;
             Ok(())
         })?;
@@ -603,6 +668,9 @@ impl Guard {
             self.crontab.write(Some(&data))?;
         } else {
             let path = Path::new(&item.original_path);
+            if self.config.system {
+                no_symlinked_dirs(path)?;
+            }
             if !force && fs::symlink_metadata(path).is_ok() {
                 bail!("{} exists; use --force to replace it", path.display());
             }
@@ -628,6 +696,29 @@ impl Guard {
     }
 }
 
+/// Fail if a folder on the way to `path` is a symbolic link (or `path` has no real parent).
+fn no_symlinked_dirs(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("no parent folder"))?;
+    // A missing folder is created later by the restore; check the part that exists.
+    let mut existing = parent;
+    while fs::symlink_metadata(existing).is_err() {
+        existing = existing
+            .parent()
+            .ok_or_else(|| io::Error::other("no existing parent folder"))?;
+    }
+    let real = fs::canonicalize(existing)?;
+    if real != existing {
+        return Err(io::Error::other(format!(
+            "{} goes through a symbolic link ({}); not acting on it as root",
+            path.display(),
+            real.display()
+        )));
+    }
+    Ok(())
+}
+
 fn remove_path(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -645,18 +736,39 @@ fn write_file(path: &Path, data: &[u8], mode: u32, owner: Option<(u32, u32)>) ->
         .file_name()
         .ok_or_else(|| io::Error::other("no file name"))?;
     let tmp = dir.join(format!(".{}.wachposten-tmp", name.to_string_lossy()));
-    fs::write(&tmp, data)?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    let want = fs::metadata(path)
+    // Never follow a link someone placed at the temporary name: create the file exclusively,
+    // without following links, and set mode and owner on the open file.
+    let open = || {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+    };
+    let mut file = match open() {
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // A leftover (or a planted link): remove the name itself, not what it points to.
+            fs::remove_file(&tmp)?;
+            open()?
+        }
+        r => r?,
+    };
+    file.write_all(data)?;
+    let want = fs::symlink_metadata(path)
         .ok()
+        .filter(|m| m.file_type().is_file())
         .map(|m| (m.uid(), m.gid()))
         .or(owner);
     if let Some((uid, gid)) = want {
-        let have = fs::metadata(&tmp)?;
+        let have = file.metadata()?;
         if (have.uid(), have.gid()) != (uid, gid) {
-            chown(&tmp, Some(uid), Some(gid))?;
+            std::os::unix::fs::fchown(&file, Some(uid), Some(gid))?;
         }
     }
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
+    file.sync_all()?;
+    drop(file);
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         fs::remove_file(path)?;
     }
@@ -703,4 +815,73 @@ fn systemd_cleanup(path: &Path, removed: bool, user: bool) {
         run(&["stop", unit]);
     }
     run(&["daemon-reload"]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_file_does_not_follow_a_planted_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let victim = d.join("victim");
+        fs::write(&victim, "keep").unwrap();
+        // Someone placed a link at the temporary name.
+        symlink(&victim, d.join(".restored.wachposten-tmp")).unwrap();
+        write_file(&d.join("restored"), b"new", 0o644, None).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert_eq!(fs::read_to_string(d.join("restored")).unwrap(), "new");
+    }
+
+    #[test]
+    fn symlinked_folders_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(d.join("real")).unwrap();
+        fs::write(d.join("real/file"), "x").unwrap();
+        symlink(d.join("real"), d.join("link")).unwrap();
+        assert!(no_symlinked_dirs(&d.join("real/file")).is_ok());
+        assert!(no_symlinked_dirs(&d.join("link/file")).is_err());
+        // A folder that does not exist yet is checked from the part that does.
+        assert!(no_symlinked_dirs(&d.join("real/new/file")).is_ok());
+        assert!(no_symlinked_dirs(&d.join("link/new/file")).is_err());
+    }
+
+    #[test]
+    fn root_does_not_remove_through_a_linked_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir_all(d.join("etc")).unwrap();
+        fs::write(d.join("etc/passwd"), "root:x:0:0").unwrap();
+        fs::create_dir_all(d.join("tmp/.d")).unwrap();
+        symlink(d.join("etc"), d.join("tmp/.d/e")).unwrap();
+        let config = Config {
+            home: d.join("home"),
+            data_dir: d.join("state"),
+            crontab: false,
+            systemctl: false,
+            system: true,
+            verify_packages: false,
+        };
+        let mut g = Guard::open(config).unwrap();
+        let ev = g
+            .record_file(&FileReport {
+                path: &d.join("tmp/.d/e/passwd"),
+                kind: Kind::TempExec,
+                severity: Severity::Suspicious,
+                ask: true,
+                findings: &[],
+                details: &[],
+                uid: Some(1000),
+                even_if_allowed: false,
+            })
+            .unwrap()
+            .unwrap();
+        assert!(g.remove(ev.id, None).is_err());
+        assert_eq!(
+            fs::read_to_string(d.join("etc/passwd")).unwrap(),
+            "root:x:0:0"
+        );
+    }
 }
